@@ -1,0 +1,83 @@
+# Knowledge Health Review Queue — UI Improvements (v2)
+
+**Date:** 2026-05-01
+**Status:** Planning
+**Project:** Atomic
+**Request:** Enhance the existing Review Queue modal with per-item inline actions, per-tab re-scan, richer resolution workflow (3-option Keep A/Keep B/Merge, source/recency badges, diff highlighting), batch selection, filtering/sorting, resolved counters, markdown export, and dashboard deep-linking. Preserve existing theme and layout.
+
+---
+
+## Executive Summary
+
+The Review Queue modal (`HealthReviewModal.tsx`) renders 5 tabs over a single `HealthReport` snapshot. Today it has lightweight actions on two tabs (Content overlap: Merge/Keep both; Boilerplate: informational) and passive display on the other three (Contradictions, No source, Tag structure). The proposed v2 turns it into an interactive queue: every tab supports per-item actions, batch selection, filtering, and a persistent "dismissed/resolved" state. Several backend additions are required — dismissal storage, per-item source updates, per-check re-scan, LLM strip-boilerplate and merge-editor previews, and tag merge/move endpoints exposed for the modal.
+
+**Recommended phasing:** ship in 4 waves — (A) dismissals + inline actions that reuse existing endpoints, (B) per-tab re-scan + resolved counters + lazy loading, (C) resolution upgrades (3-option resolver, diff highlighting, source badges, merge editor), (D) batch operations + export + dashboard integration.
+
+---
+
+## Current Architecture & Evidence
+
+### Modal structure — `src/components/dashboard/widgets/HealthReviewModal.tsx` (644 lines)
+
+- Single top-level `HealthReviewModal` component (L502–L643) takes a full `HealthReport` and a `checkName` pre-selector
+- Tabs array built at L520–L526 — included conditionally based on which `checks[*]` has non-empty data
+- `selectedTab` state at L528; `activeTab` defaults to first available tab (L529)
+- `resolvedCount` state (L531) currently only increments on Content overlap `applyPairFix`; no persistence across sessions or tabs
+- Escape key + body scroll lock at L533–L541; no other keyboard shortcuts
+- `applyPairFix` callback at L543–L556 calls `apply_health_item_fix` with `check: 'duplicate_detection'`; `setResolvedCount(n => n + 1)` on success
+- Tab bodies: `PairRow` (L68–L197), `BoilerplateSection` (L227–L267), `ContradictionRow`/`ContradictionSection` (L271–L376), `ContentQualitySection` (L380–L427), `TagHealthSection` (L431–L487)
+- No batch selection, no filtering, no sorting controls, no re-scan, no export, no source/recency badges, no diff highlighting
+
+### Action endpoints — `crates/atomic-server/src/routes/health.rs`
+
+| Endpoint | What it does today | Relevance |
+|---|---|---|
+| `GET /api/health/knowledge` | Full report with all 5 review-data blobs | Used on modal open |
+| `POST /api/health/fix` (`run_health_fix`) | Batch auto-fix across all checks | Used by the dashboard's big button, not by the modal |
+| `POST /api/health/fix/{check}/{item_id}` (`apply_manual_fix`) | Per-item manual fix | Currently only handles `(duplicate_detection, merge_with_llm)` (L100–L125); **all other check+action pairs return 400** |
+| `POST /api/health/undo/{fix_id}` | Undo a logged fix | Wired in the dashboard undo toast |
+| `GET /api/health/history` / `GET /api/health/fixes/recent` | Historical reports and fix log | Not used by the modal |
+| `POST /api/health/check/{check_name}` (`compute_single_check`) | Re-run one check in isolation | **Already exists** — can power per-tab re-scan |
+
+### Existing fix primitives we can reuse
+
+- `crates/atomic-core/src/health/llm_fixes.rs`
+  - `merge_duplicate_pair(core, atom_a, atom_b, dry_run)` — returns the merged content when `dry_run=true` (no writes), otherwise writes + logs (L79–L226). Already supports preview.
+  - `fix_untagged_complete_atoms(core, ids, dry_run)` — re-runs tagging pipeline
+- `crates/atomic-core/src/storage/sqlite/tags.rs`
+  - `apply_tag_merges_impl(&[TagMerge { winner_name, loser_name, reason }])` — canonical tag merge path (L512–L532); also exposed on `AtomicCore::apply_tag_merges` (`lib.rs` L2134)
+  - `update_tag_impl(id, name, parent_id)` at L178–L219 — can reparent a tag (used for "Move under…")
+  - `delete_tag_impl(id, recursive)` at L394 — exists for orphan cleanup
+- Atom updates: `update_atom` command (command-map.ts L74–L79) takes `{ content, source_url, published_at, tag_ids, ... }` — "Add source" inline can reuse this with the atom's existing content
+
+### Data shapes that back the queue
+
+All live inside the `HealthReport` blob computed on demand; per-atom pre-fetches happen in `PairRow.toggleExpand` (L96–L110) and `ContradictionRow.toggleExpand` (L276–L292) via `get_atom`. There is **no** persistent "dismissed" state — if you refresh, everything that was dismissed returns.
+
+### Dashboard integration — `src/components/dashboard/widgets/HealthWidget.tsx`
+
+- "Apply N automatic fixes" button at the bottom of the widget (excluded checks tracked in `excludedFromFix`, L370+). Already has tooltip/label infrastructure.
+- `setShowReviewModal(checkName)` is called from two places — auto-pops to first `requires_review` check on the main "Review" button, and from the `HealthCheckRow` component per-row. Deep-link works already; the issue is post-resolution dashboard refresh.
+
+---
+
+## Recommended Approach
+
+Split across 4 phases so UX improvements land incrementally and each wave is independently shippable:
+
+| Phase | Theme | Major deps |
+|---|---|---|
+| **A** | Dismissals + inline per-item actions | New DB table `health_dismissals`; extend `apply_manual_fix` |
+| **B** | Per-tab re-scan, resolved counters, lazy content fetch | Reuse `compute_single_check`; new `checkUpdatedAt` state |
+| **C** | 3-option resolver, source/recency badges, diff highlighting, merge-editor, contradiction summary | Extend `get_atom` cache; LLM-powered conflict summary; `diff-match-patch` dep |
+| **D** | Batch selection, Strip boilerplate LLM pass, export, dashboard real-time sync | New `POST /api/health/strip-boilerplate`; frontend markdown export helper |
+
+### Why dismissals must be persistent
+
+Every feature (resolved counter, "Show deferred" toggle, "Mark intentional", batch dismiss, "Ignore pair") depends on somewhere to store *"this item should not appear until the underlying condition changes"*. Without it, every refresh re-surfaces everything, which defeats the queue metaphor. The cheapest fix is a new `health_dismissals` table keyed by `(check_name, item_key)` — see Phase A below for the schema.
+
+### Dependency footprint
+
+- Backend (Rust): 1 new migration, 1 new table, ~6 new endpoints/wrapper methods, 1 LLM prompt for "strip boilerplate", 1 LLM prompt for "contradiction summary"
+- Frontend (TS): `diff-match-patch` (≈ 50KB, widely used, no peer deps). All other work uses existing primitives (Zustand store, Tailwind, lucide icons)
+
