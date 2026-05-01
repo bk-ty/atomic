@@ -1,0 +1,123 @@
+{
+  "folders": [
+    {
+      "path": ".",
+      "name": "Atomic (root)"
+    },
+    {
+      "path": "crates/atomic-core",
+      "name": "atomic-core"
+    },
+    {
+      "path": "crates/atomic-server",
+      "name": "atomic-server"
+    }
+  ],
+  "settings": {
+    "rust-analyzer.check.command": "clippy",
+    "rust-analyzer.check.extraArgs": [
+      "--all",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "rust-analyzer.formatting.formatOnSave": true,
+    "rust-analyzer.inlayHints.bindingModeHints.enable": true,
+    "rust-analyzer.inlayHints.expressionAdjustmentHints.enable": "always",
+    "rust-analyzer.inlayHints.typeHints.enable": true,
+    "rust-analyzer.procMacro.enable": true,
+    "editor.formatOnSave": true,
+    "editor.defaultFormatter": "esbenp.prettier-vscode",
+    "[rust]": {
+      "editor.defaultFormatter": "rust-lang.rust-analyzer",
+      "editor.formatOnSave": true,
+      "editor.codeActionsOnSave": {
+        "source.fixAll.clippy": "explicit"
+      }
+    },
+    "[typescript]": {
+      "editor.defaultFormatter": "esbenp.prettier-vscode"
+    },
+    "[json]": {
+      "editor.defaultFormatter": "esbenp.prettier-vscode"
+    },
+    "files.exclude": {
+      "**/node_modules": true,
+      "**/target": true,
+      "**/.git": true,
+      "**/.DS_Store": true
+    },
+    "search.exclude": {
+      "**/node_modules": true,
+      "**/target": true,
+      "**/.git": true
+    },
+    "eslint.validate": [
+      "javascript",
+      "typescript",
+      "typescriptreact"
+    ],
+    "tailwindCSS.experimental.classRegex": [
+      [
+        "cva\\(([^)]*)\\)",
+        "(?:'|\"|`)([^']*)(?:'|\"|`)"
+      ]
+    ]
+  },
+  "launch": {
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "name": "Tauri App",
+        "type": "lldb",
+        "request": "launch",
+        "cargo": {
+          "args": [
+            "build",
+            "--manifest-path",
+            "src-tauri/Cargo.toml",
+            "--release"
+          ],
+          "filter": {
+            "name": "atomic"
+          }
+        },
+        "cwd": "${workspaceFolder}"
+      }
+    ]
+  },
+  "tasks": {
+    "version": "2.0.0",
+    "tasks": [
+      {
+        "label": "cargo test",
+        "command": "cargo",
+        "args": [
+          "test",
+          "--all"
+        ],
+        "type": "shell",
+        "group": {
+          "kind": "test",
+          "isDefault": true
+        },
+        "presentation": {
+          "reveal": "always",
+          "panel": "new"
+        }
+      },
+      {
+        "label": "npm test",
+        "command": "npm",
+        "args": [
+          "test"
+        ],
+        "type": "shell",
+        "presentation": {
+          "reveal": "always",
+          "panel": "new"
+        }
+      }
+    ]
+  }
+}

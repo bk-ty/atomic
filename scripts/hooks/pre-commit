@@ -1,0 +1,31 @@
+#!/bin/bash
+# Pre-commit hook for Atomic
+# Runs formatting and basic checks before allowing a commit
+
+set -e
+
+echo "🔍 Pre-commit checks..."
+
+# Format Rust code
+echo "  Formatting Rust..."
+cargo fmt --all
+
+# Format TypeScript/JavaScript
+echo "  Formatting TypeScript..."
+npx prettier --write src/ 2>/dev/null || true
+
+# Type check TypeScript
+echo "  Checking types..."
+npx tsc --noEmit
+
+# Run linters
+echo "  Running clippy..."
+cargo clippy --all -- -D warnings
+
+echo "  Running ESLint..."
+npx eslint src/ --fix 2>/dev/null || true
+
+# Stage formatted changes
+git add -A
+
+echo "✓ Pre-commit checks passed"
