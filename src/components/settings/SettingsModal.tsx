@@ -76,6 +76,7 @@ const MACOS_FULL_DISK_ACCESS_URL =
 import { formatRelativeDate } from '../../lib/date';
 import { useDatabasesStore, type DatabaseInfo, type DatabaseStats } from '../../stores/databases';
 import { OverrideControls } from './OverrideControls';
+import { TaggingStrategySection } from './TaggingStrategySection';
 import { HealthConfigTab } from '../health/HealthConfigTab';
 import { CustomChecksPanel } from '../health/CustomChecksPanel';
 
@@ -1068,6 +1069,19 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
   const [briefingPrompt, setBriefingPrompt] = useState('');
   const [chatPrompt, setChatPrompt] = useState('');
   const [taggingPrompt, setTaggingPrompt] = useState('');
+  // Auto-tagging strategy + k-NN tunables.
+  //
+  // The pipeline supports four strategies:
+  //   - knn_then_llm (default): k-NN inheritance from semantically nearest
+  //     atoms, then the LLM extractor runs and may add (never remove) more
+  //     tags. Best of both worlds for established libraries.
+  //   - knn_only: k-NN only; no LLM call. Cheapest and fully deterministic.
+  //   - truncated_full_content: legacy LLM-only on the document head.
+  //   - chunk_assisted: legacy LLM-only with chunk citations.
+  const [taggingStrategy, setTaggingStrategy] = useState('knn_then_llm');
+  const [knnTaggingK, setKnnTaggingK] = useState('10');
+  const [knnTaggingMinConsensus, setKnnTaggingMinConsensus] = useState('3');
+  const [knnTaggingMinSimilarity, setKnnTaggingMinSimilarity] = useState('0.55');
   const [mergeDuplicatesPrompt, setMergeDuplicatesPrompt] = useState('');
   const [contradictionDetectionPrompt, setContradictionDetectionPrompt] = useState('');
   const [stripBoilerplatePrompt, setStripBoilerplatePrompt] = useState('');
@@ -1544,6 +1558,10 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
     setBriefingPrompt(settings.briefing_prompt || '');
     setChatPrompt(settings.chat_prompt || '');
     setTaggingPrompt(settings.tagging_prompt || '');
+    setTaggingStrategy(settings.tagging_strategy || 'knn_then_llm');
+    setKnnTaggingK(settings.knn_tagging_k || '10');
+    setKnnTaggingMinConsensus(settings.knn_tagging_min_consensus || '3');
+    setKnnTaggingMinSimilarity(settings.knn_tagging_min_similarity || '0.55');
     setMergeDuplicatesPrompt(settings['health.merge_duplicates_prompt'] || '');
     setContradictionDetectionPrompt(settings['health.contradiction_detection_prompt'] || '');
     setStripBoilerplatePrompt(settings['health.strip_boilerplate_prompt'] || '');
@@ -2866,6 +2884,25 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                     </div>
                     <OverrideControls settingKey="auto_tagging_enabled" />
                   </div>
+
+                  {/* Tagging strategy + k-NN tunables.
+                      Only meaningful when auto-tagging is on; mirror the
+                      gate the rest of this tab uses. */}
+                  {autoTaggingEnabled && (
+                    <TaggingStrategySection
+                      strategy={taggingStrategy}
+                      onStrategyChange={(v) => { setTaggingStrategy(v); autoSave('tagging_strategy', v); }}
+                      knnK={knnTaggingK}
+                      onKnnKChange={setKnnTaggingK}
+                      onKnnKCommit={(v) => autoSave('knn_tagging_k', v)}
+                      knnMinConsensus={knnTaggingMinConsensus}
+                      onKnnMinConsensusChange={setKnnTaggingMinConsensus}
+                      onKnnMinConsensusCommit={(v) => autoSave('knn_tagging_min_consensus', v)}
+                      knnMinSimilarity={knnTaggingMinSimilarity}
+                      onKnnMinSimilarityChange={setKnnTaggingMinSimilarity}
+                      onKnnMinSimilarityCommit={(v) => autoSave('knn_tagging_min_similarity', v)}
+                    />
+                  )}
 
                   <TagCategoriesTab />
                 </>
