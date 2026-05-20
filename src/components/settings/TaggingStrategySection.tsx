@@ -1,5 +1,7 @@
+import { useState } from 'react';
 import { CustomSelect } from '../ui/CustomSelect';
 import { OverrideControls } from './OverrideControls';
+import { Button } from '../ui/Button';
 
 /**
  * Auto-tagging strategy + k-NN tunables.
@@ -106,6 +108,13 @@ interface Props {
   knnMinSimilarity: string;
   onKnnMinSimilarityChange: (value: string) => void;
   onKnnMinSimilarityCommit: (value: string) => void;
+
+  /**
+   * Invoked when the user clicks "Re-tag all atoms". The parent owns the
+   * side effect (API call + toast + busy state) so this component stays
+   * presentation-only. Omit for read-only views.
+   */
+  onRetagAll?: () => Promise<void> | void;
 }
 
 export function TaggingStrategySection({
@@ -120,11 +129,29 @@ export function TaggingStrategySection({
   knnMinSimilarity,
   onKnnMinSimilarityChange,
   onKnnMinSimilarityCommit,
+  onRetagAll,
 }: Props) {
   const description =
     STRATEGY_DESCRIPTIONS[strategy] ??
     'Choose how new atoms get their tags assigned.';
   const showKnnKnobs = strategyUsesKnn(strategy);
+  const [confirmRetag, setConfirmRetag] = useState(false);
+  const [retagging, setRetagging] = useState(false);
+
+  const handleRetagClick = async () => {
+    if (!onRetagAll) return;
+    if (!confirmRetag) {
+      setConfirmRetag(true);
+      return;
+    }
+    try {
+      setRetagging(true);
+      await onRetagAll();
+    } finally {
+      setRetagging(false);
+      setConfirmRetag(false);
+    }
+  };
 
   return (
     <div className="space-y-4 rounded-md border border-[var(--color-border)] bg-[var(--color-bg-panel)] p-4">
@@ -176,6 +203,42 @@ export function TaggingStrategySection({
             step={0.05}
             settingKey="knn_tagging_min_similarity"
           />
+        </div>
+      )}
+
+      {onRetagAll && (
+        <div className="flex items-start justify-between gap-4 border-t border-[var(--color-border)] pt-4">
+          <div className="space-y-1">
+            <label className="block text-sm font-medium text-[var(--color-text-primary)]">
+              Re-tag existing atoms
+            </label>
+            <p className="text-xs text-[var(--color-text-secondary)]">
+              Re-runs auto-tagging on every atom in this database with completed embeddings.
+              Useful after switching strategies. Existing tags are preserved — this only adds.
+            </p>
+          </div>
+          <div className="flex flex-shrink-0 items-center gap-2">
+            {confirmRetag && !retagging && (
+              <button
+                type="button"
+                onClick={() => setConfirmRetag(false)}
+                className="text-xs text-[var(--color-text-secondary)] hover:underline"
+              >
+                Cancel
+              </button>
+            )}
+            <Button
+              variant={confirmRetag ? 'danger' : 'secondary'}
+              onClick={handleRetagClick}
+              disabled={retagging}
+            >
+              {retagging
+                ? 'Re-tagging…'
+                : confirmRetag
+                  ? 'Confirm re-tag all'
+                  : 'Re-tag all atoms'}
+            </Button>
+          </div>
         </div>
       )}
     </div>

@@ -422,6 +422,31 @@ impl SqliteStorage {
         Ok(count as i32)
     }
 
+    /// Bulk-flip every atom whose embedding stage is complete back to
+    /// `tagging_status = 'pending'`, regardless of its current tagging
+    /// status. Used by `retag_all_atoms` to force a re-run of the auto-tag
+    /// pipeline (e.g. after the user changes the tagging strategy).
+    ///
+    /// Atoms currently in `processing` are left alone — claiming them out
+    /// from under the in-flight worker would race the lease.
+    pub(crate) fn reset_completed_tagging_to_pending_sync(&self) -> StorageResult<i32> {
+        let conn = self
+            .db
+            .conn
+            .lock()
+            .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+
+        let count = conn.execute(
+            "UPDATE atoms
+             SET tagging_status = 'pending', tagging_error = NULL
+             WHERE embedding_status = 'complete'
+               AND tagging_status != 'processing'",
+            [],
+        )?;
+
+        Ok(count as i32)
+    }
+
     pub(crate) fn rebuild_semantic_edges_sync(&self) -> StorageResult<i32> {
         let conn = self
             .db
@@ -1437,6 +1462,10 @@ impl ChunkStore for SqliteStorage {
 
     async fn reset_failed_tagging_statuses(&self) -> StorageResult<i32> {
         self.reset_failed_tagging_statuses_sync()
+    }
+
+    async fn reset_completed_tagging_to_pending(&self) -> StorageResult<i32> {
+        self.reset_completed_tagging_to_pending_sync()
     }
 
     async fn rebuild_semantic_edges(&self) -> StorageResult<i32> {

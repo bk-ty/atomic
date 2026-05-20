@@ -1799,7 +1799,6 @@ impl AtomicCore {
     ) -> Result<WikiArticleStatus, AtomicCoreError> {
         self.storage.get_wiki_status_sync(tag_id).await
     }
-
     /// Delete a wiki article (and any pending proposal for it — once the
     /// underlying article is gone, the proposal references a base that no
     /// longer exists).
@@ -2239,7 +2238,6 @@ impl AtomicCore {
         }
         Ok(count)
     }
-
     // ==================== Clustering ====================
 
     /// Compute atom clusters based on semantic similarity

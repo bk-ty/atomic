@@ -297,6 +297,15 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     method: 'GET',
     path: (a) => `/api/wiki/${encodeURIComponent(a.tagId as string)}/status`,
   },
+  get_wiki_citation_details: {
+    method: 'GET',
+    path: (a) => `/api/wiki/${encodeURIComponent(a.tagId as string)}/citations/detailed`,
+  },
+  untag_atom: {
+    method: 'DELETE',
+    path: (a) =>
+      `/api/atoms/${encodeURIComponent(a.atomId as string)}/tags/${encodeURIComponent(a.tagId as string)}`,
+  },
   generate_wiki_article: {
     method: 'POST',
     path: (a) => `/api/wiki/${encodeURIComponent(a.tagId as string)}/generate`,

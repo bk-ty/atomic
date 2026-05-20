@@ -885,6 +885,8 @@ dispatch! {
         => sqlite: reset_failed_embedding_statuses_sync, pg_trait: ChunkStore, pg_method: reset_failed_embedding_statuses;
     fn reset_failed_tagging_statuses_sync(&self) -> Result<i32, AtomicCoreError>
         => sqlite: reset_failed_tagging_statuses_sync, pg_trait: ChunkStore, pg_method: reset_failed_tagging_statuses;
+    fn reset_completed_tagging_to_pending_sync(&self) -> Result<i32, AtomicCoreError>
+        => sqlite: reset_completed_tagging_to_pending_sync, pg_trait: ChunkStore, pg_method: reset_completed_tagging_to_pending;
     fn rebuild_semantic_edges_sync(&self) -> Result<i32, AtomicCoreError>
         => sqlite: rebuild_semantic_edges_sync, pg_trait: ChunkStore, pg_method: rebuild_semantic_edges;
     fn get_semantic_edges_sync(&self, min_similarity: f32) -> Result<Vec<SemanticEdge>, AtomicCoreError>

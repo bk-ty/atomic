@@ -2901,6 +2901,18 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                       knnMinSimilarity={knnTaggingMinSimilarity}
                       onKnnMinSimilarityChange={setKnnTaggingMinSimilarity}
                       onKnnMinSimilarityCommit={(v) => autoSave('knn_tagging_min_similarity', v)}
+                      onRetagAll={async () => {
+                        try {
+                          const count = await retagAllAtoms();
+                          toast.success(
+                            count > 0
+                              ? `Re-tagging ${count} ${count === 1 ? 'atom' : 'atoms'}…`
+                              : 'No atoms eligible for re-tagging',
+                          );
+                        } catch (e) {
+                          toast.error(`Failed to re-tag: ${e instanceof Error ? e.message : String(e)}`);
+                        }
+                      }}
                     />
                   )}
 

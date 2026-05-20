@@ -342,6 +342,12 @@ pub trait ChunkStore: Send + Sync {
     /// Reset only failed tagging atoms back to pending when embeddings are complete.
     async fn reset_failed_tagging_statuses(&self) -> StorageResult<i32>;
 
+    /// Reset every atom whose embedding stage is complete back to
+    /// `tagging_status = 'pending'`. Used to force a global re-tag — e.g.
+    /// after the user changes the tagging strategy or wants to backfill
+    /// k-NN inheritance over their existing library.
+    async fn reset_completed_tagging_to_pending(&self) -> StorageResult<i32>;
+
     /// Rebuild semantic edges between all atoms with embeddings.
     async fn rebuild_semantic_edges(&self) -> StorageResult<i32>;
 
@@ -654,7 +660,6 @@ pub trait WikiStore: Send + Sync {
 
     /// Get wiki article status (exists, atom count, etc.).
     async fn get_wiki_status(&self, tag_id: &str) -> StorageResult<WikiArticleStatus>;
-
     /// Save or update a wiki article with citations.
     async fn save_wiki(
         &self,
