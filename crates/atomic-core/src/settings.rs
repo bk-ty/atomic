@@ -62,7 +62,7 @@ pub const DEFAULT_SETTINGS: &[(&str, &str)] = &[
     // Pipeline strategy defaults. These are intentionally conservative: whole-atom
     // rechunking and cost-bounded full-content tagging with truncation.
     ("embedding_strategy", "rechunk_whole_atom"),
-    ("tagging_strategy", "truncated_full_content"),
+    ("tagging_strategy", "knn_then_llm"),
     ("wiki_model", "anthropic/claude-sonnet-4.6"),
     ("wiki_strategy", "centroid"),
     ("chat_model", "anthropic/claude-sonnet-4.6"),
@@ -78,6 +78,13 @@ pub const DEFAULT_SETTINGS: &[(&str, &str)] = &[
     ("briefing_prompt", ""),
     ("chat_prompt", ""),
     ("tagging_prompt", ""),
+    // k-NN tag inheritance — propagates tags from semantically nearest
+    // already-tagged atoms before/instead of the LLM tagger. Sure-fire path
+    // for content that resembles existing atoms (recurring meetings, repeated
+    // topics). Falls through to the LLM strategy when no tag clears consensus.
+    ("knn_tagging_k", "10"),
+    ("knn_tagging_min_consensus", "3"),
+    ("knn_tagging_min_similarity", "0.55"),
     // Scheduled tasks — see crate::scheduler::state for key format
     ("task.daily_briefing.enabled", "true"),
     ("task.daily_briefing.interval_hours", "24"),

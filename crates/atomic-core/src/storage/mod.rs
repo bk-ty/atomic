@@ -559,6 +559,27 @@ impl StorageBackend {
             StorageBackend::Postgres(_) => Ok(0),
         }
     }
+    pub(crate) async fn knn_inherit_tags_sync(
+        &self,
+        atom_id: &str,
+        config: crate::embedding::KnnTaggingConfig,
+    ) -> Result<Vec<String>, AtomicCoreError> {
+        match self {
+            StorageBackend::Sqlite(s) => {
+                let s = s.clone();
+                let atom_id = atom_id.to_string();
+                tokio::task::spawn_blocking(move || s.knn_inherit_tags_impl(&atom_id, config))
+                    .await
+                    .map_err(join_err)?
+            }
+            // Postgres: would need an equivalent pgvector neighbor query;
+            // not implemented yet. Returning Ok(empty) lets the LLM step run
+            // unmolested rather than failing the whole tagging job.
+            #[cfg(feature = "postgres")]
+            StorageBackend::Postgres(_) => Ok(Vec::new()),
+        }
+    }
+
 }
 
 // ==================== Async dispatch methods ====================
