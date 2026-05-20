@@ -23,12 +23,34 @@ function flattenVisibleTags(
   level: number = 0
 ): FlattenedTag[] {
   const result: FlattenedTag[] = [];
+  const seen = new Set<string>();
   for (const tag of tags) {
+    if (seen.has(tag.id)) {
+      // Same tag id appears twice at this level — server sent a duplicate or
+      // a tree-mutation race produced one. Skip the repeat to avoid React
+      // key collisions (which manifest as overlapping/ghosted rows).
+      if (typeof console !== 'undefined') {
+        console.warn('[TagTree] duplicate tag id in tree, skipping', tag.id, tag.name);
+      }
+      continue;
+    }
+    seen.add(tag.id);
     result.push({ tag, level });
     if (tag.children.length > 0 && expandedTagIds[tag.id]) {
       const children = flattenVisibleTags(tag.children, expandedTagIds, level + 1);
       for (let i = 0; i < children.length; i++) {
-        result.push(children[i]);
+        const child = children[i];
+        const childKey = child.loadMoreParentId
+          ? `load-more:${child.loadMoreParentId}`
+          : child.tag.id;
+        if (seen.has(childKey)) {
+          if (typeof console !== 'undefined') {
+            console.warn('[TagTree] duplicate tag id across subtree, skipping', childKey);
+          }
+          continue;
+        }
+        seen.add(childKey);
+        result.push(child);
       }
       // Add "load more" sentinel if there are more children on the server
       if (tag.children.length < tag.children_total) {
@@ -78,39 +100,37 @@ export function TagTree({ onOpenTagSettings }: TagTreeProps = {}) {
     return map;
   }, [flatTags]);
 
-  const scrolledSelectedTagIdRef = useRef<string | null>(null);
   const virtualizer = useVirtualizer({
     count: flatTags.length,
     getScrollElement: () => scrollContainerRef.current,
     estimateSize: () => 32,
     overscan: 20,
+    measureElement:
+      typeof ResizeObserver !== 'undefined'
+        ? (el) => el.getBoundingClientRect().height
+        : undefined,
   });
 
-  // Remeasure virtualizer when tree structure changes (expansion/collapse)
-  useEffect(() => {
-    virtualizer.measure();
-  }, [flatTags, virtualizer]);
-
-  // Scroll to selected tag when the selection changes, or when an initially
-  // empty async-loaded tree later receives that selected tag. Once a selection
-  // has been scrolled into view, tree-only changes like expand/collapse should
-  // not pull the scroll position back to the active row.
+  // Scroll to selected tag. Only fire when the selected id actually changes —
+  // tagIndexMap and virtualizer get fresh references on every tree mutation,
+  // and including them here caused the sidebar to re-scroll (with smooth
+  // behavior) on every expand/collapse/fetch.
+  const lastScrolledSelectedId = useRef<string | null>(null);
   useEffect(() => {
     if (!selectedTagId) {
-      scrolledSelectedTagIdRef.current = null;
+      lastScrolledSelectedId.current = null;
       return;
     }
-
-    if (scrolledSelectedTagIdRef.current === selectedTagId) {
-      return;
-    }
-
+    if (lastScrolledSelectedId.current === selectedTagId) return;
     const index = tagIndexMap.get(selectedTagId);
-    if (index !== undefined) {
-      virtualizer.scrollToIndex(index, { align: 'center', behavior: 'smooth' });
-      scrolledSelectedTagIdRef.current = selectedTagId;
-    }
-  }, [selectedTagId, tagIndexMap, virtualizer]);
+    if (index === undefined) return;
+    lastScrolledSelectedId.current = selectedTagId;
+    const t = setTimeout(() => {
+      virtualizer.scrollToIndex(index, { align: 'auto', behavior: 'smooth' });
+    }, 50);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTagId]);
 
   const [contextMenu, setContextMenu] = useState<{
     position: { x: number; y: number } | null;
@@ -286,13 +306,14 @@ export function TagTree({ onOpenTagSettings }: TagTreeProps = {}) {
               const { tag, level, loadMoreParentId, loadMoreRemaining } = item;
               return (
                 <div
-                  key={loadMoreParentId ? `load-more-${loadMoreParentId}` : tag.id}
+                  key={loadMoreParentId ? `load-more-${loadMoreParentId}` : `tag-${tag.id}`}
+                  data-index={virtualItem.index}
+                  ref={virtualizer.measureElement}
                   style={{
                     position: 'absolute',
                     top: 0,
                     left: 0,
                     right: 0,
-                    height: `${virtualItem.size}px`,
                     transform: `translateY(${virtualItem.start}px)`,
                   }}
                 >

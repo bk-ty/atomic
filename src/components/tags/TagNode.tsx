@@ -21,11 +21,18 @@ export const TagNode = memo(function TagNode({ tag, level, selectedTagId, onSele
 
   const handleToggle = useCallback(async (e: MouseEvent) => {
     e.stopPropagation();
-    // If expanding and there are more children than currently loaded, fetch all
-    if (!isExpanded && tag.children_total > tag.children.length) {
-      await fetchTagChildren(tag.id);
-    }
+    // Flip expanded state immediately so the click feels responsive.
     toggleTagExpanded(tag.id);
+    const willExpand = !isExpanded;
+    if (willExpand && tag.children_total > tag.children.length) {
+      try {
+        await fetchTagChildren(tag.id);
+      } catch (err) {
+        // Fetch failed — collapse back so the user can retry.
+        toggleTagExpanded(tag.id);
+        throw err;
+      }
+    }
   }, [isExpanded, tag.children_total, tag.children.length, tag.id, fetchTagChildren, toggleTagExpanded]);
 
   const handleContextMenu = (e: MouseEvent) => {
