@@ -138,10 +138,15 @@ pub async fn propose_wiki(
 ) -> HttpResponse {
     let tag_id = path.into_inner();
     match db.0.propose_wiki_update(&tag_id, &body.tag_name).await {
-        Ok(Some(proposal)) => HttpResponse::Ok().json(proposal),
-        Ok(None) => HttpResponse::Ok().json(serde_json::json!({
-            "status": "no_update_needed"
-        })),
+        Ok(atomic_core::WikiProposeOutcome::Proposed(proposal)) => {
+            HttpResponse::Ok().json(proposal)
+        }
+        Ok(atomic_core::WikiProposeOutcome::NoUpdateNeeded) => {
+            HttpResponse::Ok().json(serde_json::json!({ "status": "no_update_needed" }))
+        }
+        Ok(atomic_core::WikiProposeOutcome::NotReady) => {
+            HttpResponse::Ok().json(serde_json::json!({ "status": "not_ready" }))
+        }
         Err(e) => crate::error::error_response(e),
     }
 }

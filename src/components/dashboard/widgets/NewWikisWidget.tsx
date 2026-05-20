@@ -1,13 +1,23 @@
 import { Section } from '../Section';
 import { useWikiStore } from '../../../stores/wiki';
+import { useUIStore } from '../../../stores/ui';
 
 const MAX_ITEMS = 5;
 
 export function NewWikisWidget() {
   const suggestedArticles = useWikiStore(s => s.suggestedArticles);
   const openAndGenerate = useWikiStore(s => s.openAndGenerate);
+  const openWikiReader = useUIStore(s => s.openWikiReader);
 
   const items = suggestedArticles.slice(0, MAX_ITEMS);
+
+  const handleClick = (tagId: string, tagName: string) => {
+    // Start generation in the wiki store first so isGenerating is true
+    // before the reader mounts, then open the overlay so the user sees
+    // the WikiGenerating state immediately.
+    openAndGenerate(tagId, tagName);
+    openWikiReader(tagId, tagName);
+  };
 
   return (
     <Section label="Ready to generate">
@@ -20,7 +30,7 @@ export function NewWikisWidget() {
           {items.map(s => (
             <li key={s.tag_id}>
               <button
-                onClick={() => openAndGenerate(s.tag_id, s.tag_name)}
+                onClick={() => handleClick(s.tag_id, s.tag_name)}
                 className="w-full flex items-baseline gap-3 px-2 py-1.5 rounded hover:bg-[var(--color-bg-hover)]/60 text-left group"
               >
                 <span className="flex-1 min-w-0 truncate text-sm text-[var(--color-text-secondary)] group-hover:text-[var(--color-text-primary)]">

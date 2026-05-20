@@ -130,6 +130,437 @@ impl StorageBackend {
     }
 }
 
+impl StorageBackend {
+    // ==================== Health dispatch methods ====================
+    // These are not part of the Storage trait — health is an internal concern.
+    // Postgres returns an error for all health operations (not yet supported).
+
+    pub(crate) async fn health_check_data_sync(
+        &self,
+        thresholds: crate::health::HealthThresholds,
+    ) -> Result<crate::storage::sqlite::health::HealthRawData, AtomicCoreError> {
+        match self {
+            StorageBackend::Sqlite(s) => {
+                let s = s.clone();
+                tokio::task::spawn_blocking(move || s.health_check_data_impl(&thresholds))
+                    .await
+                    .map_err(join_err)?
+            }
+            #[cfg(feature = "postgres")]
+            StorageBackend::Postgres(_) => Err(AtomicCoreError::DatabaseOperation(
+                "health checks not yet supported on Postgres storage".to_string(),
+            )),
+        }
+    }
+
+    pub(crate) async fn store_health_report_sync(
+        &self,
+        report: &crate::health::audit::StoredHealthReport,
+    ) -> Result<(), AtomicCoreError> {
+        match self {
+            StorageBackend::Sqlite(s) => {
+                let s = s.clone();
+                let report = report.clone();
+                tokio::task::spawn_blocking(move || s.store_health_report_impl(&report))
+                    .await
+                    .map_err(join_err)?
+            }
+            #[cfg(feature = "postgres")]
+            StorageBackend::Postgres(_) => Err(AtomicCoreError::DatabaseOperation("health reports not supported on Postgres storage".into())),
+        }
+    }
+
+    pub(crate) async fn get_latest_health_report_sync(
+        &self,
+    ) -> Result<Option<crate::health::HealthReport>, AtomicCoreError> {
+        match self {
+            StorageBackend::Sqlite(s) => {
+                let s = s.clone();
+                tokio::task::spawn_blocking(move || s.get_latest_health_report_impl())
+                    .await
+                    .map_err(join_err)?
+            }
+            #[cfg(feature = "postgres")]
+            StorageBackend::Postgres(_) => Err(AtomicCoreError::DatabaseOperation("health reports not supported on Postgres storage".into())),
+        }
+    }
+
+    pub(crate) async fn get_health_reports_sync(
+        &self,
+        limit: i32,
+    ) -> Result<Vec<crate::health::audit::StoredHealthReport>, AtomicCoreError> {
+        match self {
+            StorageBackend::Sqlite(s) => {
+                let s = s.clone();
+                tokio::task::spawn_blocking(move || s.get_health_reports_impl(limit))
+                    .await
+                    .map_err(join_err)?
+            }
+            #[cfg(feature = "postgres")]
+            StorageBackend::Postgres(_) => Err(AtomicCoreError::DatabaseOperation("health reports not supported on Postgres storage".into())),
+        }
+    }
+
+    pub(crate) async fn log_fix_action_sync(
+        &self,
+        log: &crate::health::audit::HealthFixLog,
+    ) -> Result<(), AtomicCoreError> {
+        match self {
+            StorageBackend::Sqlite(s) => {
+                let s = s.clone();
+                let log = log.clone();
+                tokio::task::spawn_blocking(move || s.log_fix_action_impl(&log))
+                    .await
+                    .map_err(join_err)?
+            }
+            #[cfg(feature = "postgres")]
+            StorageBackend::Postgres(_) => Err(AtomicCoreError::DatabaseOperation("health fix log not supported on Postgres storage".into())),
+        }
+    }
+
+    pub(crate) async fn get_fix_log_sync(
+        &self,
+        fix_id: &str,
+    ) -> Result<Option<crate::health::audit::HealthFixLog>, AtomicCoreError> {
+        match self {
+            StorageBackend::Sqlite(s) => {
+                let s = s.clone();
+                let fix_id = fix_id.to_string();
+                tokio::task::spawn_blocking(move || s.get_fix_log_impl(&fix_id))
+                    .await
+                    .map_err(join_err)?
+            }
+            #[cfg(feature = "postgres")]
+            StorageBackend::Postgres(_) => Err(AtomicCoreError::DatabaseOperation("health fix log not supported on Postgres storage".into())),
+        }
+    }
+
+    pub(crate) async fn get_recent_fixes_sync(
+        &self,
+        limit: i32,
+    ) -> Result<Vec<crate::health::audit::HealthFixLog>, AtomicCoreError> {
+        match self {
+            StorageBackend::Sqlite(s) => {
+                let s = s.clone();
+                tokio::task::spawn_blocking(move || s.get_recent_fixes_impl(limit))
+                    .await
+                    .map_err(join_err)?
+            }
+            #[cfg(feature = "postgres")]
+            StorageBackend::Postgres(_) => Err(AtomicCoreError::DatabaseOperation("health fix log not supported on Postgres storage".into())),
+        }
+    }
+
+    pub(crate) async fn mark_fix_undone_sync(&self, fix_id: &str) -> Result<(), AtomicCoreError> {
+        match self {
+            StorageBackend::Sqlite(s) => {
+                let s = s.clone();
+                let fix_id = fix_id.to_string();
+                tokio::task::spawn_blocking(move || s.mark_fix_undone_impl(&fix_id))
+                    .await
+                    .map_err(join_err)?
+            }
+            #[cfg(feature = "postgres")]
+            StorageBackend::Postgres(_) => Err(AtomicCoreError::DatabaseOperation("health fix log not supported on Postgres storage".into())),
+        }
+    }
+
+    pub(crate) async fn reset_skipped_untagged_to_pending_sync(
+        &self,
+    ) -> Result<i32, AtomicCoreError> {
+        match self {
+            StorageBackend::Sqlite(s) => {
+                let s = s.clone();
+                tokio::task::spawn_blocking(move || {
+                    s.reset_skipped_untagged_to_pending_impl()
+                })
+                .await
+                .map_err(join_err)?
+            }
+            #[cfg(feature = "postgres")]
+            StorageBackend::Postgres(_) => Err(AtomicCoreError::DatabaseOperation("health fixes not supported on Postgres storage".into())),
+        }
+    }
+
+    // ==================== Link resolution dispatch ====================
+
+    pub(crate) async fn get_link_candidate_atoms_sync(
+        &self,
+    ) -> Result<Vec<(String, String, Option<String>)>, AtomicCoreError> {
+        match self {
+            StorageBackend::Sqlite(s) => {
+                let s = s.clone();
+                tokio::task::spawn_blocking(move || s.get_link_candidate_atoms_impl())
+                    .await
+                    .map_err(join_err)?
+            }
+            #[cfg(feature = "postgres")]
+            StorageBackend::Postgres(_) => Err(AtomicCoreError::DatabaseOperation("link-resolution helpers not supported on Postgres storage".into())),
+        }
+    }
+
+    pub(crate) async fn find_atoms_by_source_urls_sync(
+        &self,
+        urls: Vec<String>,
+    ) -> Result<std::collections::HashMap<String, String>, AtomicCoreError> {
+        match self {
+            StorageBackend::Sqlite(s) => {
+                let s = s.clone();
+                tokio::task::spawn_blocking(move || s.find_atoms_by_source_urls_impl(&urls))
+                    .await
+                    .map_err(join_err)?
+            }
+            #[cfg(feature = "postgres")]
+            StorageBackend::Postgres(_) => Err(AtomicCoreError::DatabaseOperation("link-resolution helpers not supported on Postgres storage".into())),
+        }
+    }
+
+    pub(crate) async fn find_atom_by_wikilink_name_sync(
+        &self,
+        name: String,
+        vault_prefix: String,
+    ) -> Result<Option<(String, String)>, AtomicCoreError> {
+        match self {
+            StorageBackend::Sqlite(s) => {
+                let s = s.clone();
+                tokio::task::spawn_blocking(move || {
+                    s.find_atom_by_wikilink_name_impl(&name, &vault_prefix)
+                })
+                .await
+                .map_err(join_err)?
+            }
+            #[cfg(feature = "postgres")]
+            StorageBackend::Postgres(_) => Err(AtomicCoreError::DatabaseOperation("link-resolution helpers not supported on Postgres storage".into())),
+        }
+    }
+
+
+    pub(crate) async fn suggest_atoms_by_query_sync(
+        &self,
+        q: String,
+        limit: i32,
+    ) -> Result<Vec<(String, String, Option<String>, f32)>, AtomicCoreError> {
+        match self {
+            StorageBackend::Sqlite(s) => {
+                let s = s.clone();
+                tokio::task::spawn_blocking(move || s.suggest_atoms_by_query_impl(&q, limit))
+                    .await
+                    .map_err(join_err)?
+            }
+            #[cfg(feature = "postgres")]
+            StorageBackend::Postgres(_) => Err(AtomicCoreError::DatabaseOperation("atom-query suggestion not supported on Postgres storage".into())),
+        }
+    }
+    pub(crate) async fn get_tag_by_id_sync(
+        &self,
+        tag_id: &str,
+    ) -> Result<Option<(String, Option<String>)>, AtomicCoreError> {
+        match self {
+            StorageBackend::Sqlite(s) => {
+                let s = s.clone();
+                let tag_id = tag_id.to_string();
+                tokio::task::spawn_blocking(move || s.get_tag_by_id_impl(&tag_id))
+                    .await
+                    .map_err(join_err)?
+            }
+            #[cfg(feature = "postgres")]
+            StorageBackend::Postgres(_) => Err(AtomicCoreError::DatabaseOperation("tag lookup helper not supported on Postgres storage".into())),
+        }
+    }
+
+    pub(crate) async fn list_dismissed_keys_sync(
+        &self,
+        check_name: &str,
+    ) -> Result<Vec<(String, String)>, AtomicCoreError> {
+        match self {
+            StorageBackend::Sqlite(s) => {
+                let s = s.clone();
+                let check_name = check_name.to_string();
+                tokio::task::spawn_blocking(move || s.list_dismissed_keys_impl(&check_name))
+                    .await
+                    .map_err(join_err)?
+            }
+            #[cfg(feature = "postgres")]
+            StorageBackend::Postgres(_) => Err(AtomicCoreError::DatabaseOperation("health dismissals not supported on Postgres storage".into())),
+        }
+    }
+
+    pub(crate) async fn dismiss_health_item_sync(
+        &self,
+        check_name: &str,
+        item_key: &str,
+        reason: &str,
+        expires_at: Option<&str>,
+    ) -> Result<(), AtomicCoreError> {
+        match self {
+            StorageBackend::Sqlite(s) => {
+                let s = s.clone();
+                let check_name = check_name.to_string();
+                let item_key = item_key.to_string();
+                let reason = reason.to_string();
+                let expires_at = expires_at.map(String::from);
+                tokio::task::spawn_blocking(move || {
+                    s.dismiss_health_item_impl(&check_name, &item_key, &reason, expires_at.as_deref())
+                })
+                .await
+                .map_err(join_err)?
+            }
+            #[cfg(feature = "postgres")]
+            StorageBackend::Postgres(_) => Err(AtomicCoreError::DatabaseOperation("health dismissals not supported on Postgres storage".into())),
+        }
+    }
+
+    pub(crate) async fn undismiss_health_item_sync(
+        &self,
+        check_name: &str,
+        item_key: &str,
+    ) -> Result<(), AtomicCoreError> {
+        match self {
+            StorageBackend::Sqlite(s) => {
+                let s = s.clone();
+                let check_name = check_name.to_string();
+                let item_key = item_key.to_string();
+                tokio::task::spawn_blocking(move || {
+                    s.undismiss_health_item_impl(&check_name, &item_key)
+                })
+                .await
+                .map_err(join_err)?
+            }
+            #[cfg(feature = "postgres")]
+            StorageBackend::Postgres(_) => Err(AtomicCoreError::DatabaseOperation("health dismissals not supported on Postgres storage".into())),
+        }
+    }
+
+    pub(crate) async fn gc_dismissals_sync(&self) -> Result<u64, AtomicCoreError> {
+        match self {
+            StorageBackend::Sqlite(s) => {
+                let s = s.clone();
+                tokio::task::spawn_blocking(move || s.gc_dismissals_impl())
+                    .await
+                    .map_err(join_err)?
+            }
+            #[cfg(feature = "postgres")]
+            StorageBackend::Postgres(_) => Err(AtomicCoreError::DatabaseOperation("health dismissals not supported on Postgres storage".into())),
+        }
+    }
+
+    pub(crate) async fn save_tag_proposal_sync(
+        &self,
+        proposal: crate::health::TagProposal,
+    ) -> Result<(), AtomicCoreError> {
+        match self {
+            StorageBackend::Sqlite(s) => {
+                let s = s.clone();
+                tokio::task::spawn_blocking(move || s.save_tag_proposal_impl(&proposal))
+                    .await
+                    .map_err(join_err)?
+            }
+            #[cfg(feature = "postgres")]
+            StorageBackend::Postgres(_) => Err(AtomicCoreError::DatabaseOperation("tag proposals not supported on Postgres storage".into())),
+        }
+    }
+
+    pub(crate) async fn get_tag_proposal_sync(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::health::TagProposal>, AtomicCoreError> {
+        match self {
+            StorageBackend::Sqlite(s) => {
+                let s = s.clone();
+                let id = id.to_string();
+                tokio::task::spawn_blocking(move || s.get_tag_proposal_impl(&id))
+                    .await
+                    .map_err(join_err)?
+            }
+            #[cfg(feature = "postgres")]
+            StorageBackend::Postgres(_) => Err(AtomicCoreError::DatabaseOperation("tag proposals not supported on Postgres storage".into())),
+        }
+    }
+
+    pub(crate) async fn get_latest_tag_proposal_sync(
+        &self,
+    ) -> Result<Option<crate::health::TagProposal>, AtomicCoreError> {
+        match self {
+            StorageBackend::Sqlite(s) => {
+                let s = s.clone();
+                tokio::task::spawn_blocking(move || s.get_latest_tag_proposal_impl())
+                    .await
+                    .map_err(join_err)?
+            }
+            #[cfg(feature = "postgres")]
+            StorageBackend::Postgres(_) => Err(AtomicCoreError::DatabaseOperation("tag proposals not supported on Postgres storage".into())),
+        }
+    }
+
+    pub(crate) async fn mark_tag_proposal_applied_sync(
+        &self,
+        id: &str,
+    ) -> Result<(), AtomicCoreError> {
+        match self {
+            StorageBackend::Sqlite(s) => {
+                let s = s.clone();
+                let id = id.to_string();
+                tokio::task::spawn_blocking(move || s.mark_tag_proposal_applied_impl(&id))
+                    .await
+                    .map_err(join_err)?
+            }
+            #[cfg(feature = "postgres")]
+            StorageBackend::Postgres(_) => Err(AtomicCoreError::DatabaseOperation("tag proposals not supported on Postgres storage".into())),
+        }
+    }
+    pub(crate) async fn count_chunk_hash_occurrences_sync(
+        &self,
+        hashes: &[String],
+    ) -> Result<std::collections::HashMap<String, i64>, AtomicCoreError> {
+        match self {
+            StorageBackend::Sqlite(s) => {
+                let s = s.clone();
+                let hashes = hashes.to_vec();
+                tokio::task::spawn_blocking(move || s.count_chunk_hash_occurrences_impl(&hashes))
+                    .await
+                    .map_err(join_err)?
+            }
+            // Postgres: no content_hash column yet; returning "no duplicates"
+            // is a correct fallback — boilerplate filter becomes a no-op.
+            #[cfg(feature = "postgres")]
+            StorageBackend::Postgres(_) => Ok(std::collections::HashMap::new()),
+        }
+    }
+
+    pub(crate) async fn delete_vec_chunks_by_ids_sync(
+        &self,
+        chunk_ids: &[String],
+    ) -> Result<(), AtomicCoreError> {
+        match self {
+            StorageBackend::Sqlite(s) => {
+                let s = s.clone();
+                let chunk_ids = chunk_ids.to_vec();
+                tokio::task::spawn_blocking(move || s.delete_vec_chunks_by_ids_impl(&chunk_ids))
+                    .await
+                    .map_err(join_err)?
+            }
+            // Postgres: boilerplate filter is a no-op (see count_chunk_hash_occurrences_sync).
+            // Nothing to delete.
+            #[cfg(feature = "postgres")]
+            StorageBackend::Postgres(_) => Ok(()),
+        }
+    }
+
+    pub(crate) async fn backfill_content_hashes_sync(&self) -> Result<usize, AtomicCoreError> {
+        match self {
+            StorageBackend::Sqlite(s) => {
+                let s = s.clone();
+                tokio::task::spawn_blocking(move || s.backfill_content_hashes_impl())
+                    .await
+                    .map_err(join_err)?
+            }
+            // Postgres: no content_hash column to backfill yet.
+            #[cfg(feature = "postgres")]
+            StorageBackend::Postgres(_) => Ok(0),
+        }
+    }
+}
+
 // ==================== Async dispatch methods ====================
 //
 // Each method dispatches to either the SqliteStorage sync helper
@@ -353,6 +784,8 @@ dispatch! {
         => sqlite: get_atoms_with_embeddings_impl, pg_trait: AtomStore, pg_method: get_atoms_with_embeddings;
     fn get_tag_ids_for_atoms_batch_impl(&self, atom_ids: &[String]) -> Result<Vec<String>, AtomicCoreError>
         => sqlite: get_tag_ids_for_atoms_batch_impl, pg_trait: AtomStore, pg_method: get_tag_ids_for_atoms_batch;
+    fn get_atom_tag_ids_impl(&self, atom_id: &str) -> Result<Vec<String>, AtomicCoreError>
+        => sqlite: get_atom_tag_ids_impl, pg_trait: AtomStore, pg_method: get_atom_tag_ids;
     fn get_atom_content_impl(&self, atom_id: &str) -> Result<Option<String>, AtomicCoreError>
         => sqlite: get_atom_content_impl, pg_trait: AtomStore, pg_method: get_atom_content;
     fn get_atom_contents_batch_impl(&self, atom_ids: &[String]) -> Result<Vec<(String, String)>, AtomicCoreError>
@@ -579,7 +1012,7 @@ dispatch! {
         => sqlite: get_due_feeds_sync, pg_trait: FeedStore, pg_method: get_due_feeds;
     fn mark_feed_polled_sync(&self, id: &str, error: Option<&str>) -> Result<(), AtomicCoreError>
         => sqlite: mark_feed_polled_sync, pg_trait: FeedStore, pg_method: mark_feed_polled;
-    fn claim_feed_item_sync(&self, feed_id: &str, guid: &str) -> Result<bool, AtomicCoreError>
+    fn claim_feed_item_sync(&self, feed_id: &str, guid: &str, item_title: Option<&str>, item_link: Option<&str>) -> Result<bool, AtomicCoreError>
         => sqlite: claim_feed_item_sync, pg_trait: FeedStore, pg_method: claim_feed_item;
     fn complete_feed_item_sync(&self, feed_id: &str, guid: &str, atom_id: &str) -> Result<(), AtomicCoreError>
         => sqlite: complete_feed_item_sync, pg_trait: FeedStore, pg_method: complete_feed_item;

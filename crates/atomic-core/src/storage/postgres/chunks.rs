@@ -43,6 +43,21 @@ impl ChunkStore for PostgresStorage {
                     e
                 ))
             })?;
+        if status == "complete" {
+            sqlx::query(
+                "UPDATE atom_pipeline_jobs SET embed_requested = FALSE \
+                 WHERE atom_id = $1 AND db_id = $2 \
+                   AND embed_requested = TRUE \
+                   AND atom_updated_at = (SELECT updated_at FROM atoms WHERE id = $1 AND db_id = $2)",
+            )
+            .bind(atom_id)
+            .bind(&self.db_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(format!(
+                "Failed to clear embed_requested flag: {}", e
+            )))?;
+        }
         Ok(())
     }
 
@@ -64,6 +79,21 @@ impl ChunkStore for PostgresStorage {
         .map_err(|e| {
             AtomicCoreError::DatabaseOperation(format!("Failed to set tagging status: {}", e))
         })?;
+        if status == "complete" || status == "skipped" {
+            sqlx::query(
+                "UPDATE atom_pipeline_jobs SET tag_requested = FALSE \
+                 WHERE atom_id = $1 AND db_id = $2 \
+                   AND tag_requested = TRUE \
+                   AND atom_updated_at = (SELECT updated_at FROM atoms WHERE id = $1 AND db_id = $2)",
+            )
+            .bind(atom_id)
+            .bind(&self.db_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(format!(
+                "Failed to clear tag_requested flag: {}", e
+            )))?;
+        }
         Ok(())
     }
 
@@ -568,20 +598,21 @@ impl ChunkStore for PostgresStorage {
             .into_iter()
             .map(|r| {
                 let atom = Atom {
-                    id: r.0.clone(),
-                    content: r.1,
-                    title: r.2,
-                    snippet: r.3,
-                    source_url: r.4,
-                    source: r.5,
-                    published_at: r.6,
-                    created_at: r.7,
-                    updated_at: r.8,
-                    embedding_status: r.9,
-                    tagging_status: r.10,
-                    embedding_error: r.11,
-                    tagging_error: r.12,
-                };
+                                id: r.0.clone(),
+                                content: r.1,
+                                title: r.2,
+                                snippet: r.3,
+                                source_url: r.4,
+                                source: r.5,
+                                published_at: r.6,
+                                created_at: r.7,
+                                updated_at: r.8,
+                                embedding_status: r.9,
+                                tagging_status: r.10,
+                                embedding_error: r.11,
+                                tagging_error: r.12,
+                                is_locked: false,
+                            };
                 (r.0, atom)
             })
             .collect();
@@ -1402,6 +1433,16 @@ impl ChunkStore for PostgresStorage {
                 AtomicCoreError::DatabaseOperation(format!("Failed to clear pipeline job: {}", e))
             })?;
         }
+        // Cleanup rows where both flags were cleared by step-wise completion.
+        sqlx::query(
+            "DELETE FROM atom_pipeline_jobs WHERE embed_requested = FALSE AND tag_requested = FALSE AND db_id = $1",
+        )
+        .bind(&self.db_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| AtomicCoreError::DatabaseOperation(format!(
+            "Failed to cleanup zero-flag pipeline jobs: {}", e
+        )))?;
         tx.commit().await.map_err(|e| {
             AtomicCoreError::DatabaseOperation(format!("Failed to commit transaction: {}", e))
         })?;

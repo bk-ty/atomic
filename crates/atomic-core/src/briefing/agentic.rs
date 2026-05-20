@@ -652,6 +652,7 @@ mod tests {
                 tagging_status: "complete".to_string(),
                 embedding_error: None,
                 tagging_error: None,
+                is_locked: false,
             },
             tags: vec![],
         }

@@ -40,6 +40,8 @@ export interface WikiArticleSummary {
   updated_at: string;
   atom_count: number;
   inbound_links: number;
+  /** Live count of atoms added since last generation. Computed server-side via recursive CTE. */
+  new_atoms_available: number;
 }
 
 export interface WikiLink {
@@ -441,6 +443,13 @@ export const useWikiStore = create<WikiStore>((set, get) => ({
         });
         // Refresh status so the banner reflects the latest atom count.
         get().fetchArticleStatus(tagId);
+      } else if ('status' in result && result.status === 'not_ready') {
+        set({ isProposing: false, proposal: null });
+        toast.info('Atoms still processing', {
+          id: 'wiki-propose-not-ready',
+          description: 'New atoms are still being embedded. Try again once embedding completes.',
+        });
+        // Do NOT refresh status — the banner should stay showing the pending atoms.
       } else {
         set({ proposal: result as WikiProposal, isProposing: false });
         toast.success('Suggested update ready', {

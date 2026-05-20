@@ -31,6 +31,7 @@ pub mod agent;
 pub mod atom_edit;
 pub(crate) mod atom_links;
 pub mod briefing;
+pub(crate) mod boilerplate;
 pub mod canvas_level;
 pub mod chat;
 pub mod chunking;
@@ -43,6 +44,7 @@ pub mod executor;
 pub mod export;
 pub mod extraction;
 pub mod graph_maintenance;
+pub mod health;
 pub mod import;
 pub mod ingest;
 pub mod manager;
@@ -77,6 +79,19 @@ pub use providers::{ProviderConfig, ProviderType};
 pub use registry::{DatabaseInfo, OAuthCodeInfo, Registry};
 pub use search::{SearchMode, SearchOptions};
 pub use tokens::ApiTokenInfo;
+
+/// Outcome of `AtomicCore::propose_wiki_update`.
+#[derive(Debug)]
+pub enum WikiProposeOutcome {
+    /// The LLM proposed section changes — a proposal is ready to review.
+    Proposed(WikiProposal),
+    /// No atoms have been added since the last update (or the LLM evaluated
+    /// the new content and decided no changes are needed). Baseline advanced.
+    NoUpdateNeeded,
+    /// New atoms exist but have no embeddable chunks yet (embedding still in
+    /// progress). Baseline was NOT advanced — retry once embedding completes.
+    NotReady,
+}
 
 use chrono::Utc;
 use rusqlite::Connection;
@@ -511,6 +526,19 @@ impl AtomicCore {
     pub(crate) fn storage(&self) -> &storage::StorageBackend {
         &self.storage
     }
+
+    /// Suggest atom candidates for a broken link query.
+    /// Returns vec of (atom_id, title, source_url, score).
+    pub async fn suggest_atoms_for_broken_link(
+        &self,
+        q: &str,
+        limit: i32,
+    ) -> Result<Vec<(String, String, Option<String>, f32)>, crate::error::AtomicCoreError> {
+        self.storage
+            .suggest_atoms_by_query_sync(q.to_string(), limit)
+            .await
+    }
+
 
     // ==================== Settings ====================
     //
@@ -1600,14 +1628,12 @@ impl AtomicCore {
     ///
     /// Runs the strategy's chunk selector, then the shared section-ops
     /// generator, and writes the result to `wiki_proposals`. Supersedes any
-    /// existing pending proposal for the tag. Returns `None` when the strategy
-    /// determines no update is warranted (no new atoms, or the LLM returned
-    /// NoChange).
+    /// existing pending proposal for the tag.
     pub async fn propose_wiki_update(
         &self,
         tag_id: &str,
         tag_name: &str,
-    ) -> Result<Option<WikiProposal>, AtomicCoreError> {
+    ) -> Result<WikiProposeOutcome, AtomicCoreError> {
         let _guard = self.wiki_tag_lock(tag_id).await;
         tracing::info!(tag_name, tag_id, "[wiki] Proposing article update");
 
@@ -1617,53 +1643,26 @@ impl AtomicCore {
 
         let (strategy, ctx) = self.build_wiki_strategy_context(tag_id, tag_name).await?;
 
-        let draft = match wiki::strategy_propose_outcome(&strategy, &ctx, &existing)
+        let strategy_outcome = wiki::strategy_propose(&strategy, &ctx, &existing)
             .await
-            .map_err(|e| AtomicCoreError::Wiki(e))?
-        {
-            wiki::WikiProposalOutcome::Draft(d) => d,
-            wiki::WikiProposalOutcome::NoChange => {
-                // The LLM evaluated update chunks and decided nothing needs to
-                // change. Advance the baseline so the same atoms are not
-                // re-evaluated on every subsequent "Generate Update" click.
+            .map_err(|e| AtomicCoreError::Wiki(e))?;
+
+        let draft = match strategy_outcome {
+            wiki::WikiStrategyOutcome::NotReady => {
+                // New atoms found but not yet embedded — do NOT advance
+                // updated_at so they can be retried once chunks are available.
+                tracing::info!(tag_id, "[wiki] Update not ready; atom embeddings still in progress");
+                return Ok(WikiProposeOutcome::NotReady);
+            }
+            wiki::WikiStrategyOutcome::NoNewAtoms | wiki::WikiStrategyOutcome::LlmNoChange => {
                 if let Err(e) = self.storage.advance_wiki_baseline_sync(tag_id, None).await {
                     tracing::warn!(tag_id, error = %e, "[wiki] Failed to advance article baseline on no-change");
                 } else {
-                    tracing::info!(
-                        tag_id,
-                        "[wiki] No update warranted; article baseline advanced"
-                    );
+                    tracing::info!(tag_id, "[wiki] No update warranted; article baseline advanced");
                 }
-                return Ok(None);
+                return Ok(WikiProposeOutcome::NoUpdateNeeded);
             }
-            wiki::WikiProposalOutcome::NoUpdateChunks => {
-                // No chunks were selected. This can mean there are truly no new
-                // atoms, but it can also mean older atoms were newly associated
-                // with this tag hierarchy. Only advance if the current tag count
-                // has not increased beyond the article's recorded baseline.
-                match self
-                    .storage
-                    .advance_wiki_baseline_sync(tag_id, Some(existing.article.atom_count))
-                    .await
-                {
-                    Ok(true) => {
-                        tracing::info!(
-                            tag_id,
-                            "[wiki] No update chunks selected; article baseline advanced"
-                        );
-                    }
-                    Ok(false) => {
-                        tracing::info!(
-                            tag_id,
-                            "[wiki] No update chunks selected; article baseline left unchanged because atom count increased"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(tag_id, error = %e, "[wiki] Failed to advance article baseline after empty update selection");
-                    }
-                }
-                return Ok(None);
-            }
+            wiki::WikiStrategyOutcome::Proposed(d) => d,
         };
 
         let proposal = WikiProposal {
@@ -1686,9 +1685,9 @@ impl AtomicCore {
             "[wiki] Proposal saved"
         );
 
-        Ok(Some(proposal))
-    }
+        Ok(WikiProposeOutcome::Proposed(proposal))
 
+    }
     /// Get the pending wiki proposal for a tag, if any.
     pub async fn get_wiki_proposal(
         &self,
@@ -2284,6 +2283,66 @@ impl AtomicCore {
         let result = self.storage.apply_tag_merges_impl(merges).await?;
         self.canvas_cache.invalidate();
         Ok(result)
+    }
+
+    /// Get a tag name and parent_id by ID.
+    pub async fn get_tag_by_id(
+        &self,
+        tag_id: &str,
+    ) -> Result<Option<(String, Option<String>)>, AtomicCoreError> {
+        self.storage.get_tag_by_id_sync(tag_id).await
+    }
+
+    /// Get the most recent un-applied tag proposal, if any.
+    pub async fn get_latest_tag_proposal(
+        &self,
+    ) -> Result<Option<crate::health::TagProposal>, AtomicCoreError> {
+        self.storage.get_latest_tag_proposal_sync().await
+    }
+
+    /// Persist a manually-constructed tag proposal without calling the LLM.
+    pub async fn save_tag_proposal(
+        &self,
+        proposal: crate::health::TagProposal,
+    ) -> Result<(), AtomicCoreError> {
+        self.storage.save_tag_proposal_sync(proposal).await
+    }
+
+    /// Persist a health dismissal (insert or update).
+    pub async fn dismiss_health_item(
+        &self,
+        check_name: &str,
+        item_key: &str,
+        reason: &str,
+        expires_at: Option<&str>,
+    ) -> Result<(), AtomicCoreError> {
+        self.storage
+            .dismiss_health_item_sync(check_name, item_key, reason, expires_at)
+            .await
+    }
+
+    /// Remove a health dismissal.
+    pub async fn undismiss_health_item(
+        &self,
+        check_name: &str,
+        item_key: &str,
+    ) -> Result<(), AtomicCoreError> {
+        self.storage
+            .undismiss_health_item_sync(check_name, item_key)
+            .await
+    }
+
+    /// GC stale health dismissal rows (expired TTL + orphaned atom/tag refs).
+    pub async fn gc_health_dismissals(&self) -> Result<u64, AtomicCoreError> {
+        self.storage.gc_dismissals_sync().await
+    }
+
+    /// List active dismissals for a check. Returns (item_key, reason) pairs.
+    pub async fn list_dismissed_keys(
+        &self,
+        check_name: &str,
+    ) -> Result<Vec<(String, String)>, AtomicCoreError> {
+        self.storage.list_dismissed_keys_sync(check_name).await
     }
 
     // ==================== Chat Operations ====================
@@ -3538,7 +3597,7 @@ impl AtomicCore {
 
         for item in &parsed.items {
             // Claim the GUID atomically — if another poll already claimed it, skip.
-            if !self.claim_feed_item(feed_id, &item.guid).await? {
+            if !self.claim_feed_item(feed_id, &item.guid, item.title.as_deref(), item.link.as_deref()).await? {
                 continue;
             }
 
@@ -3659,8 +3718,8 @@ impl AtomicCore {
 
     /// Atomically claim a feed item GUID. Returns true if this call claimed it,
     /// false if it was already claimed by another poll.
-    async fn claim_feed_item(&self, feed_id: &str, guid: &str) -> Result<bool, AtomicCoreError> {
-        self.storage.claim_feed_item_sync(feed_id, guid).await
+    async fn claim_feed_item(&self, feed_id: &str, guid: &str, item_title: Option<&str>, item_link: Option<&str>) -> Result<bool, AtomicCoreError> {
+        self.storage.claim_feed_item_sync(feed_id, guid, item_title, item_link).await
     }
 
     /// Mark a claimed feed item as successfully ingested with its atom_id.
@@ -3707,6 +3766,174 @@ impl AtomicCore {
     /// Useful for backfilling after this feature is added to an existing database.
     pub async fn recompute_all_tag_embeddings(&self) -> Result<i32, AtomicCoreError> {
         self.storage.recompute_all_tag_embeddings_sync().await
+    }
+
+    // ==================== Health ====================
+
+    /// Compute a full health report across all 10 checks.
+    pub async fn compute_health(&self) -> Result<crate::health::HealthReport, AtomicCoreError> {
+        crate::health::compute_health(self).await
+    }
+
+    /// Load this database's `HealthConfig`. Missing/invalid → defaults.
+    ///
+    /// Reads from the per-database `settings` table (NOT the registry), so
+    /// each data DB can have its own config. See `AGENTS.md` § Multi-DB
+    /// Gotchas for why we bypass `AtomicCore::get_setting` here.
+    pub async fn get_health_config(&self) -> Result<crate::health::HealthConfig, AtomicCoreError> {
+        let raw = self.storage().get_setting_sync("health_config").await?;
+        match raw {
+            Some(s) => Ok(serde_json::from_str(&s).unwrap_or_default()),
+            None => Ok(crate::health::HealthConfig::default()),
+        }
+    }
+
+    /// Persist this database's `HealthConfig`.
+    pub async fn set_health_config(
+        &self,
+        config: &crate::health::HealthConfig,
+    ) -> Result<(), AtomicCoreError> {
+        let errs = config.thresholds.validate();
+        if !errs.is_empty() {
+            return Err(AtomicCoreError::Validation(format!(
+                "invalid health thresholds: {}",
+                errs.join("; "),
+            )));
+        }
+        let json = serde_json::to_string(config)
+            .map_err(|e| AtomicCoreError::Validation(format!("serialize health_config: {e}")))?;
+        self.storage().set_setting_sync("health_config", &json).await
+    }
+
+    /// Set the lock flag on an atom. Locked atoms are protected from automated
+    /// health fixes (strip-boilerplate, merge-duplicate, resolve-contradiction,
+    /// relink-broken-link).
+    pub async fn set_atom_locked(&self, atom_id: &str, locked: bool) -> Result<(), AtomicCoreError> {
+        let sqlite = self.storage.as_sqlite().ok_or_else(|| {
+            AtomicCoreError::Configuration(
+                "Atom lock is not yet supported with Postgres backend".to_string(),
+            )
+        })?;
+        let conn = sqlite.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+        let affected = conn.execute(
+            "UPDATE atoms SET is_locked = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![locked as i64, chrono::Utc::now().to_rfc3339(), atom_id],
+        ).map_err(AtomicCoreError::Database)?;
+        if affected == 0 {
+            return Err(AtomicCoreError::Validation(format!("atom not found: {atom_id}")));
+        }
+        Ok(())
+    }
+
+    /// True when the atom's `is_locked` flag is set. Non-existent atoms return false.
+    pub async fn is_atom_locked(&self, atom_id: &str) -> Result<bool, AtomicCoreError> {
+        let sqlite = self.storage.as_sqlite().ok_or_else(|| {
+            AtomicCoreError::Configuration(
+                "Atom lock is not yet supported with Postgres backend".to_string(),
+            )
+        })?;
+        let conn = sqlite.db.conn.lock().map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+        let locked: i64 = conn
+            .query_row(
+                "SELECT COALESCE(is_locked, 0) FROM atoms WHERE id = ?1",
+                rusqlite::params![atom_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        Ok(locked != 0)
+    }
+
+    /// Load the per-DB list of tag ids to exclude from wiki generation.
+    ///
+    /// Any atom tagged with ANY excluded tag must not be visible to wiki LLM
+    /// prompts. Stored as a JSON array of strings under the per-DB
+    /// `wiki_excluded_tag_ids` setting. Missing/invalid → empty.
+    pub async fn get_wiki_excluded_tag_ids(&self) -> Result<Vec<String>, AtomicCoreError> {
+        let raw = self.storage().get_setting_sync("wiki_excluded_tag_ids").await?;
+        match raw {
+            Some(s) => Ok(serde_json::from_str(&s).unwrap_or_default()),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Persist the per-DB list of excluded tag ids for wiki generation.
+    pub async fn set_wiki_excluded_tag_ids(&self, tag_ids: &[String]) -> Result<(), AtomicCoreError> {
+        let json = serde_json::to_string(tag_ids)
+            .map_err(|e| AtomicCoreError::Validation(format!("serialize excluded tags: {e}")))?;
+        self.storage().set_setting_sync("wiki_excluded_tag_ids", &json).await
+    }
+
+    /// Load this database's custom health checks. Stored per-DB as a JSON
+    /// array under the `custom_health_checks` setting key (NOT registry).
+    pub async fn get_custom_health_checks(
+        &self,
+    ) -> Result<Vec<crate::health::custom::CustomCheck>, AtomicCoreError> {
+        let raw = self.storage().get_setting_sync("custom_health_checks").await?;
+        match raw {
+            Some(s) => Ok(serde_json::from_str(&s).unwrap_or_default()),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Persist this database's custom health checks.
+    pub async fn set_custom_health_checks(
+        &self,
+        checks: &[crate::health::custom::CustomCheck],
+    ) -> Result<(), AtomicCoreError> {
+        let json = serde_json::to_string(checks)
+            .map_err(|e| AtomicCoreError::Validation(format!("serialize custom_health_checks: {e}")))?;
+        self.storage().set_setting_sync("custom_health_checks", &json).await
+    }
+
+    /// Evaluate a rule against this DB without saving it. Used by the UI
+    /// for live preview while users author custom checks.
+    pub async fn preview_custom_health_check(
+        &self,
+        rule: &crate::health::custom::CustomRule,
+    ) -> Result<crate::health::custom::PreviewResult, AtomicCoreError> {
+        let sqlite = self.storage.as_sqlite().ok_or_else(|| {
+            AtomicCoreError::Configuration(
+                "Custom health checks are not yet supported with Postgres backend".to_string(),
+            )
+        })?;
+        crate::health::custom::preview_rule(sqlite, rule)
+    }
+
+    /// Run auto-fixes up to the requested tier. Returns a `FixResponse` with
+    /// actions taken, skipped issues, and the new score.
+    pub async fn run_health_fix(
+        &self,
+        req: &crate::health::FixRequest,
+    ) -> Result<crate::health::FixResponse, AtomicCoreError> {
+        crate::health::run_fix(self, req).await
+    }
+
+    /// Undo a previously applied fix by its log ID.
+    pub async fn undo_health_fix(&self, fix_id: &str) -> Result<(), AtomicCoreError> {
+        crate::health::audit::undo(self, fix_id).await
+    }
+
+    /// Fetch the most recently stored health report without recomputing.
+    pub async fn get_latest_health_report(
+        &self,
+    ) -> Result<Option<crate::health::HealthReport>, AtomicCoreError> {
+        self.storage.get_latest_health_report_sync().await
+    }
+
+    /// Fetch recent stored health reports for trend display.
+    pub async fn get_health_reports(
+        &self,
+        limit: i32,
+    ) -> Result<Vec<crate::health::audit::StoredHealthReport>, AtomicCoreError> {
+        self.storage.get_health_reports_sync(limit).await
+    }
+
+    /// Fetch recent fix log entries (most recent first).
+    pub async fn get_recent_health_fixes(
+        &self,
+        limit: i32,
+    ) -> Result<Vec<crate::health::audit::HealthFixLog>, AtomicCoreError> {
+        self.storage.get_recent_fixes_sync(limit).await
     }
 }
 
@@ -4245,10 +4472,10 @@ pub(crate) fn parse_source(source_url: &str) -> String {
 }
 
 /// Standard SELECT columns for reading an Atom from the DB.
-pub(crate) const ATOM_COLUMNS: &str = "id, content, title, snippet, source_url, source, published_at, created_at, updated_at, COALESCE(embedding_status, 'pending'), COALESCE(tagging_status, 'pending'), embedding_error, tagging_error";
+pub(crate) const ATOM_COLUMNS: &str = "id, content, title, snippet, source_url, source, published_at, created_at, updated_at, COALESCE(embedding_status, 'pending'), COALESCE(tagging_status, 'pending'), embedding_error, tagging_error, COALESCE(is_locked, 0)";
 
 /// Same columns but table-aliased for JOINs.
-pub(crate) const ATOM_COLUMNS_A: &str = "a.id, a.content, a.title, a.snippet, a.source_url, a.source, a.published_at, a.created_at, a.updated_at, COALESCE(a.embedding_status, 'pending'), COALESCE(a.tagging_status, 'pending'), a.embedding_error, a.tagging_error";
+pub(crate) const ATOM_COLUMNS_A: &str = "a.id, a.content, a.title, a.snippet, a.source_url, a.source, a.published_at, a.created_at, a.updated_at, COALESCE(a.embedding_status, 'pending'), COALESCE(a.tagging_status, 'pending'), a.embedding_error, a.tagging_error, COALESCE(a.is_locked, 0)";
 
 /// Parse an Atom from a row selected with ATOM_COLUMNS.
 pub(crate) fn atom_from_row(row: &rusqlite::Row) -> rusqlite::Result<Atom> {
@@ -4266,6 +4493,7 @@ pub(crate) fn atom_from_row(row: &rusqlite::Row) -> rusqlite::Result<Atom> {
         tagging_status: row.get(10)?,
         embedding_error: row.get(11)?,
         tagging_error: row.get(12)?,
+        is_locked: row.get::<_, i64>(13).unwrap_or(0) != 0,
     })
 }
 

@@ -818,7 +818,13 @@ pub trait FeedStore: Send + Sync {
     async fn mark_feed_polled(&self, id: &str, error: Option<&str>) -> StorageResult<()>;
 
     /// Atomically claim a feed item GUID. Returns true if this call claimed it.
-    async fn claim_feed_item(&self, feed_id: &str, guid: &str) -> StorageResult<bool>;
+    async fn claim_feed_item(
+        &self,
+        feed_id: &str,
+        guid: &str,
+        item_title: Option<&str>,
+        item_link: Option<&str>,
+    ) -> StorageResult<bool>;
 
     /// Mark a claimed feed item as successfully ingested with its atom_id.
     async fn complete_feed_item(

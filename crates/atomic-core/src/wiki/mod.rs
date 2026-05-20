@@ -143,28 +143,20 @@ pub struct WikiProposalDraft {
     pub new_atom_count: i32,
 }
 
-/// Result of attempting to build a wiki update proposal.
-pub enum WikiProposalOutcome {
-    Draft(WikiProposalDraft),
-    /// The selector found no chunks to send to the LLM.
-    NoUpdateChunks,
-    /// The LLM reviewed update chunks and explicitly found no useful change.
-    NoChange,
-}
-
-/// Propose an update to an existing wiki article using the given strategy.
-///
-/// Returns `None` if no update is warranted (no new atoms, empty ops, or the
-/// LLM returns `NoChange`).
-pub async fn strategy_propose(
-    strategy: &WikiStrategy,
-    ctx: &WikiStrategyContext,
-    existing: &WikiArticleWithCitations,
-) -> Result<Option<WikiProposalDraft>, String> {
-    match strategy_propose_outcome(strategy, ctx, existing).await? {
-        WikiProposalOutcome::Draft(draft) => Ok(Some(draft)),
-        WikiProposalOutcome::NoUpdateChunks | WikiProposalOutcome::NoChange => Ok(None),
-    }
+/// Outcome of `strategy_propose` — distinguishes why no proposal was produced.
+pub enum WikiStrategyOutcome {
+    /// The LLM produced a proposal with one or more section ops.
+    Proposed(WikiProposalDraft),
+    /// No atoms were added to this tag (or its descendants) since the last update.
+    /// Baseline should be advanced so the banner stays clear.
+    NoNewAtoms,
+    /// New atoms were found but none have been embedded yet (embedding still in
+    /// progress). Baseline must NOT be advanced — the atoms need to be retried
+    /// once their chunks are available.
+    NotReady,
+    /// The LLM evaluated the new content and decided no section changes are
+    /// needed. Baseline should be advanced to prevent re-evaluation.
+    LlmNoChange,
 }
 
 /// Propose an update to an existing wiki article using the given strategy.
@@ -179,17 +171,25 @@ pub async fn strategy_propose(
 ///    applier merges them into the existing content, and citations are extracted
 ///    from the merged output.
 ///
-/// Returns a typed no-op outcome so callers can distinguish "nothing was sent
-/// to the LLM" from "the LLM reviewed new chunks and returned `NoChange`".
-pub async fn strategy_propose_outcome(
+/// Returns the outcome; callers must handle each variant to decide whether to
+/// advance the wiki baseline.
+pub async fn strategy_propose(
     strategy: &WikiStrategy,
     ctx: &WikiStrategyContext,
     existing: &WikiArticleWithCitations,
-) -> Result<WikiProposalOutcome, String> {
-    let Some((new_chunks, total_atom_count)) =
-        select_update_chunks(strategy, ctx, existing).await?
-    else {
-        return Ok(WikiProposalOutcome::NoUpdateChunks);
+) -> Result<WikiStrategyOutcome, String> {
+    let result = select_update_chunks(strategy, ctx, existing).await?;
+
+    let (new_chunks, total_atom_count) = match result {
+        None => return Ok(WikiStrategyOutcome::NoNewAtoms),
+        Some((chunks, _count)) if chunks.is_empty() => {
+            tracing::info!(
+                tag_id = ctx.tag_id,
+                "[wiki] New atoms found but no embeddable chunks yet; embedding may still be in progress"
+            );
+            return Ok(WikiStrategyOutcome::NotReady);
+        }
+        Some((chunks, count)) => (chunks, count),
     };
 
     // New-atom count is the delta against the baseline the live article was
@@ -198,10 +198,11 @@ pub async fn strategy_propose_outcome(
     // since the last accepted version.
     let new_atom_count = (total_atom_count - existing.article.atom_count).max(0);
 
-    match generate_section_ops_proposal(ctx, existing, &new_chunks, new_atom_count).await? {
-        Some(draft) => Ok(WikiProposalOutcome::Draft(draft)),
-        None => Ok(WikiProposalOutcome::NoChange),
-    }
+    let draft = generate_section_ops_proposal(ctx, existing, &new_chunks, new_atom_count).await?;
+    Ok(match draft {
+        Some(d) => WikiStrategyOutcome::Proposed(d),
+        None => WikiStrategyOutcome::LlmNoChange,
+    })
 }
 
 /// Strategy-specific chunk selection for the propose path.
@@ -412,18 +413,28 @@ async fn generate_section_ops_proposal(
     .await?;
 
     // Convert the flat wire shape into the strict enum, validating required
-    // fields per variant. Any invalid op (unknown discriminator, missing
-    // required field) aborts the whole proposal — same posture as a
-    // hallucinated heading.
-    let ops: Vec<WikiSectionOp> = result
-        .operations
-        .into_iter()
-        .map(|wire| wire.into_op())
-        .collect::<Result<Vec<_>, String>>()
-        .map_err(|e| {
-            tracing::warn!(error = %e, "[wiki] Section-ops LLM returned an invalid operation");
-            format!("LLM returned an invalid section operation: {}", e)
-        })?;
+    // fields per variant. Invalid ops are skipped with a warning rather than
+    // aborting the whole proposal — mirrors apply_section_ops soft-fail.
+    let mut ops: Vec<WikiSectionOp> = Vec::new();
+    let mut wire_errors: Vec<String> = Vec::new();
+    for wire in result.operations {
+        match wire.into_op() {
+            Ok(op) => ops.push(op),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "[wiki] Section-ops LLM returned an invalid operation — skipping"
+                );
+                wire_errors.push(e);
+            }
+        }
+    }
+    if ops.is_empty() && !wire_errors.is_empty() {
+        return Err(format!(
+            "LLM returned no valid section operations: {}",
+            wire_errors.join("; ")
+        ));
+    }
 
     // No-op detection: empty ops, all NoChange, or a single NoChange.
     let has_meaningful_op = ops.iter().any(|o| !matches!(o, WikiSectionOp::NoChange));
@@ -432,11 +443,20 @@ async fn generate_section_ops_proposal(
         return Ok(None);
     }
 
-    // Apply ops to the existing content. Hallucinated heading → error propagates.
-    let merged_content = apply_section_ops(&existing.article.content, &ops).map_err(|e| {
-        tracing::warn!(error = %e, "[wiki] Section ops applier failed");
-        e
-    })?;
+    // Apply ops to the existing content.
+    // If every op targets a non-existent heading (all skipped), treat it the
+    // same as LLM NoChange: log a warning, advance the baseline, and return
+    // Ok(None) rather than surfacing a raw error to the user.
+    let merged_content = match apply_section_ops(&existing.article.content, &ops) {
+        Ok(content) => content,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "[wiki] All section ops referenced non-existent headings; treating as no-change"
+            );
+            return Ok(None);
+        }
+    };
 
     // Resolve citation markers in the merged content by explicit index lookup.
     //
@@ -522,25 +542,25 @@ async fn generate_section_ops_proposal(
     }))
 }
 
-/// Extract the exact text of all `##` (level 2) headings in an article, in
-/// document order. Used to tell the LLM which headings it can target.
-///
-/// Only level 2 is returned because `apply_section_ops` / `parse_sections` in
-/// `section_ops.rs` only treat `##` as a section boundary — `###` and deeper
-/// stay embedded in their parent section's body. Surfacing `###` headings to
-/// the LLM would let it target a heading the applier can't resolve, which
-/// discards the entire proposal as a hallucination.
+/// Extract all section headings (levels 2–6) in an article, in document order,
+/// returning `(level, heading_text)` pairs. Used to tell the LLM which headings
+/// it can target. All levels must be surfaced so the prompt matches the
+/// `parse_sections` applier, which now treats H2–H6 as first-class sections.
 fn extract_current_headings(content: &str) -> Vec<(u8, String)> {
     let mut headings = Vec::new();
     for line in content.lines() {
         let stripped = line.trim_start();
         let bytes = stripped.as_bytes();
-        let mut hashes = 0;
-        while hashes < bytes.len() && bytes[hashes] == b'#' {
+        let mut hashes = 0u8;
+        while (hashes as usize) < bytes.len() && bytes[hashes as usize] == b'#' {
             hashes += 1;
         }
-        if hashes >= 2 && hashes < bytes.len() && bytes[hashes] == b' ' {
-            headings.push((hashes as u8, stripped[hashes + 1..].trim().to_string()));
+        if hashes >= 2
+            && hashes <= 6
+            && (hashes as usize) < bytes.len()
+            && bytes[hashes as usize] == b' '
+        {
+            headings.push((hashes, stripped[(hashes as usize) + 1..].trim().to_string()));
         }
     }
     headings
@@ -590,7 +610,7 @@ Operations (value of the `op` field):
 - "NoChange": the new sources don't warrant updating the article. Use empty strings for heading, after_heading, and content. Return this as the ONLY operation in the list if nothing needs to change.
 - "AppendToSection": add new material to the end of an existing section. Set `heading` to the exact existing section heading. Set `content` to the new markdown to append. Leave `after_heading` as an empty string.
 - "ReplaceSection": rewrite a section's body (use sparingly — only when existing content is directly contradicted or superseded). Set `heading` to the exact existing section heading. Set `content` to the new body. Leave `after_heading` as an empty string.
-- "InsertSection": add a brand-new section (use only for genuinely new topics not covered elsewhere). Set `heading` to the new section's heading. Set `after_heading` to the exact existing heading you want to insert AFTER, or leave it empty ("") to append the new section at the end of the article. Set `content` to the new section body.
+- "InsertSection": add a brand-new section (use only for genuinely new topics not covered elsewhere). Set `heading` to the new section's heading text (no `#` prefixes). Set `after_heading` to the exact existing heading you want to insert AFTER, or leave it empty ("") to append the new section at the end of the article. The new section inherits the heading level of `after_heading`; if `after_heading` is empty, it becomes a `##` section. Set `content` to the new section body.
 
 Rules:
 - `heading` and `after_heading` values must EXACTLY match one of the headings listed under CURRENT SECTION HEADINGS when they reference existing sections. Do not paraphrase, reword, or change capitalization. Sub-headings appear indented under their parent in the list; use the exact heading text without any # prefix characters.
@@ -791,6 +811,28 @@ pub(crate) fn batch_fetch_chunk_details(
     conn: &Connection,
     chunk_ids: &[&str],
 ) -> Result<std::collections::HashMap<String, (String, i32, String)>, String> {
+    batch_fetch_chunk_details_filtered(conn, chunk_ids, &[])
+}
+
+/// Convenience: fetch chunk details and filter out any atom tagged with a
+/// wiki-excluded tag (resolved from the caller-provided list). Same signature
+/// as `batch_fetch_chunk_details` plus the exclusion set.
+pub(crate) fn batch_fetch_chunk_details_excluding_tags(
+    conn: &Connection,
+    chunk_ids: &[&str],
+    excluded_tag_ids: &[String],
+) -> Result<std::collections::HashMap<String, (String, i32, String)>, String> {
+    batch_fetch_chunk_details_filtered(conn, chunk_ids, excluded_tag_ids)
+}
+
+/// Fetch chunk details, dropping chunks whose atom is tagged with any of
+/// `excluded_tag_ids`. Use this when selecting source chunks for wiki
+/// generation so excluded-tagged notes stay out of the LLM context.
+pub(crate) fn batch_fetch_chunk_details_filtered(
+    conn: &Connection,
+    chunk_ids: &[&str],
+    excluded_tag_ids: &[String],
+) -> Result<std::collections::HashMap<String, (String, i32, String)>, String> {
     let mut map = std::collections::HashMap::new();
     // Batch in groups of 500 to stay under SQLite parameter limit
     for batch in chunk_ids.chunks(500) {
@@ -822,6 +864,40 @@ pub(crate) fn batch_fetch_chunk_details(
             map.insert(id, (atom_id, chunk_index, content));
         }
     }
+
+    // Drop chunks whose atom is tagged with any excluded tag. Done after the
+    // fetch (not in the SQL) so the filter works regardless of how the caller
+    // paginates chunk_ids.
+    if !excluded_tag_ids.is_empty() && !map.is_empty() {
+        let atom_ids: std::collections::HashSet<String> =
+            map.values().map(|(aid, _, _)| aid.clone()).collect();
+        if !atom_ids.is_empty() {
+            let atom_vec: Vec<String> = atom_ids.into_iter().collect();
+            let a_ph = atom_vec.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let t_ph = excluded_tag_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let query = format!(
+                "SELECT DISTINCT atom_id FROM atom_tags WHERE atom_id IN ({}) AND tag_id IN ({})",
+                a_ph, t_ph
+            );
+            let mut params: Vec<&dyn rusqlite::ToSql> = Vec::new();
+            for a in &atom_vec { params.push(a); }
+            for t in excluded_tag_ids { params.push(t); }
+            let mut stmt = conn.prepare(&query)
+                .map_err(|e| format!("Failed to prepare excluded-atoms query: {}", e))?;
+            let mut rows = stmt.query(rusqlite::params_from_iter(params))
+                .map_err(|e| format!("Failed to query excluded atoms: {}", e))?;
+            let mut excluded: std::collections::HashSet<String> = std::collections::HashSet::new();
+            while let Some(row) = rows.next()
+                .map_err(|e| format!("Failed to read row: {}", e))?
+            {
+                let atom_id: String = row.get(0)
+                    .map_err(|e| format!("Failed to get atom_id: {}", e))?;
+                excluded.insert(atom_id);
+            }
+            map.retain(|_, (aid, _, _)| !excluded.contains(aid));
+        }
+    }
+
     Ok(map)
 }
 
@@ -1209,12 +1285,42 @@ pub fn delete_article(conn: &Connection, tag_id: &str) -> Result<(), String> {
 
 /// Load all wiki articles with tag names for list view, sorted by importance
 pub fn load_all_wiki_articles(conn: &Connection) -> Result<Vec<WikiArticleSummary>, String> {
+    // Use a recursive CTE to compute the live atom count for each wiki article's tag
+    // hierarchy (tag + all descendants). This mirrors get_article_status exactly, so
+    // new_atoms_available here is always consistent with GET /api/wiki/{tag_id}/status.
     let mut stmt = conn
         .prepare(
-            "SELECT w.id, w.tag_id, t.name as tag_name, w.updated_at, w.atom_count,
-                    (SELECT COUNT(*) FROM wiki_links wl WHERE wl.target_tag_id = w.tag_id) as inbound_links
+            "WITH RECURSIVE
+                 -- Expand each wiki-article tag to include all its descendant tags.
+                 -- Seeded only from tags that have a wiki article so the recursion is
+                 -- bounded by the number of articles, not the full tag tree.
+                 tag_tree(root_id, id) AS (
+                     SELECT t.id, t.id
+                     FROM tags t
+                     WHERE EXISTS (SELECT 1 FROM wiki_articles wa WHERE wa.tag_id = t.id)
+                     UNION ALL
+                     SELECT tt.root_id, t.id
+                     FROM tags t
+                     JOIN tag_tree tt ON t.parent_id = tt.id
+                 ),
+                 -- Live atom count per root tag (counts atoms in the entire subtree).
+                 live_counts(tag_id, cnt) AS (
+                     SELECT tt.root_id, COUNT(DISTINCT at.atom_id)
+                     FROM tag_tree tt
+                     JOIN atom_tags at ON at.tag_id = tt.id
+                     GROUP BY tt.root_id
+                 )
+             SELECT
+                 w.id,
+                 w.tag_id,
+                 t.name AS tag_name,
+                 w.updated_at,
+                 w.atom_count,
+                 (SELECT COUNT(*) FROM wiki_links wl WHERE wl.target_tag_id = w.tag_id) AS inbound_links,
+                 MAX(0, COALESCE(lc.cnt, 0) - w.atom_count) AS new_atoms_available
              FROM wiki_articles w
              JOIN tags t ON w.tag_id = t.id
+             LEFT JOIN live_counts lc ON lc.tag_id = w.tag_id
              ORDER BY inbound_links DESC, w.atom_count DESC, w.updated_at DESC",
         )
         .map_err(|e| format!("Failed to prepare wiki articles query: {}", e))?;
@@ -1228,6 +1334,7 @@ pub fn load_all_wiki_articles(conn: &Connection) -> Result<Vec<WikiArticleSummar
                 updated_at: row.get(3)?,
                 atom_count: row.get(4)?,
                 inbound_links: row.get(5)?,
+                new_atoms_available: row.get(6)?,
             })
         })
         .map_err(|e| format!("Failed to query wiki articles: {}", e))?
@@ -1837,5 +1944,50 @@ mod tests {
             "Should deduplicate repeated citation indices"
         );
         assert_eq!(citations[0].citation_index, 1);
+    }
+
+    #[test]
+    fn test_batch_fetch_chunk_details_filtered_drops_excluded_atoms() {
+        let (db, _temp) = create_test_db();
+        let conn = db.conn.lock().unwrap();
+
+        insert_tag(&conn, "tag-public", "Public");
+        insert_tag(&conn, "tag-private", "Private");
+        insert_atom(&conn, "atom-public");
+        insert_atom(&conn, "atom-private");
+
+        // Tag atom-private with the excluded tag.
+        conn.execute(
+            "INSERT INTO atom_tags (atom_id, tag_id) VALUES (?1, ?2)",
+            rusqlite::params!["atom-private", "tag-private"],
+        ).unwrap();
+        // Tag atom-public with an unrelated tag.
+        conn.execute(
+            "INSERT INTO atom_tags (atom_id, tag_id) VALUES (?1, ?2)",
+            rusqlite::params!["atom-public", "tag-public"],
+        ).unwrap();
+
+        // Two chunks — one per atom.
+        conn.execute(
+            "INSERT INTO atom_chunks (id, atom_id, chunk_index, content) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["chunk-public", "atom-public", 0, "public body"],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO atom_chunks (id, atom_id, chunk_index, content) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["chunk-private", "atom-private", 0, "private body"],
+        ).unwrap();
+
+        let ids = ["chunk-public", "chunk-private"];
+
+        // No exclusion → both chunks returned.
+        let out = batch_fetch_chunk_details(&conn, &ids).unwrap();
+        assert_eq!(out.len(), 2);
+
+        // With tag-private excluded, only the public chunk survives.
+        let excluded = vec!["tag-private".to_string()];
+        let out = batch_fetch_chunk_details_filtered(&conn, &ids, &excluded).unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(out.contains_key("chunk-public"));
+        assert!(!out.contains_key("chunk-private"));
     }
 }

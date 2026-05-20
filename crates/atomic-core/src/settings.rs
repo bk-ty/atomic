@@ -84,6 +84,13 @@ pub const DEFAULT_SETTINGS: &[(&str, &str)] = &[
     ("task.draft_pipeline.enabled", "true"),
     ("task.draft_pipeline.interval_minutes", "1"),
     ("task.draft_pipeline.quiet_minutes", "1"),
+    // Health maintenance task
+    ("task.health_maintenance.enabled", "true"),
+    ("task.health_maintenance.interval_hours", "24"),
+    // Health LLM prompt templates (empty = use built-in defaults)
+    ("health.merge_duplicates_prompt", ""),
+    ("health.contradiction_detection_prompt", ""),
+    ("health.strip_boilerplate_prompt", ""),
 ];
 
 /// Migrate settings - add any missing default settings

@@ -124,19 +124,22 @@ struct Section {
 
 /// Apply a list of section operations to an existing article body.
 ///
-/// Returns the merged markdown. Errors if any op references a heading that
-/// doesn't exist in the article — the caller should log both the missing
-/// heading and the list of actual headings, discard the proposal, and return
-/// an error to the user.
+/// Returns the merged markdown. Errors only if *every* meaningful op fails
+/// (e.g. every heading is hallucinated) — individual misses are skipped with a
+/// tracing warning.
 pub fn apply_section_ops(existing: &str, ops: &[WikiSectionOp]) -> Result<String, String> {
     let (preamble, mut sections) = parse_sections(existing);
 
-    let mut errors: Vec<String> = Vec::new();
+    // Count non-NoChange ops so we can detect "all failed" later.
+    let meaningful = ops
+        .iter()
+        .filter(|o| !matches!(o, WikiSectionOp::NoChange))
+        .count();
+    let mut skipped: Vec<String> = Vec::new();
+
     for op in ops {
         match op {
             WikiSectionOp::NoChange => {
-                // Tolerate — callers should short-circuit on this, but if a
-                // list mixes NoChange with other ops, just skip it.
                 continue;
             }
             WikiSectionOp::AppendToSection { heading, content } => {
@@ -145,13 +148,13 @@ pub fn apply_section_ops(existing: &str, ops: &[WikiSectionOp]) -> Result<String
                         append_to_body(&mut sections[idx].body, content);
                     }
                     None => {
-                        let e = format!(
+                        let msg = format!(
                             "AppendToSection: heading '{}' not found. Existing headings: [{}]",
                             heading,
                             list_headings(&sections)
                         );
-                        tracing::warn!(error = %e, "[wiki] Skipping op with unmatched heading");
-                        errors.push(e);
+                        tracing::warn!(error = %msg, "[wiki] Skipping op with unmatched heading");
+                        skipped.push(msg);
                     }
                 }
             }
@@ -161,13 +164,13 @@ pub fn apply_section_ops(existing: &str, ops: &[WikiSectionOp]) -> Result<String
                         sections[idx].body = ensure_trailing_blank(content);
                     }
                     None => {
-                        let e = format!(
+                        let msg = format!(
                             "ReplaceSection: heading '{}' not found. Existing headings: [{}]",
                             heading,
                             list_headings(&sections)
                         );
-                        tracing::warn!(error = %e, "[wiki] Skipping op with unmatched heading");
-                        errors.push(e);
+                        tracing::warn!(error = %msg, "[wiki] Skipping op with unmatched heading");
+                        skipped.push(msg);
                     }
                 }
             }
@@ -175,52 +178,46 @@ pub fn apply_section_ops(existing: &str, ops: &[WikiSectionOp]) -> Result<String
                 after_heading,
                 heading,
                 content,
-            } => {
-                match after_heading {
-                    Some(h) => {
-                        match find_section_idx(&sections, h) {
-                            Some(idx) => {
-                                // Inherit the level of the anchor section so that
-                                // inserting after an H3 produces another H3, not H2.
-                                let level = sections[idx].level;
-                                let insert_idx = after_subtree_idx(&sections, idx);
-                                sections.insert(
-                                    insert_idx,
-                                    Section {
-                                        level,
-                                        heading: heading.clone(),
-                                        body: ensure_trailing_blank(content),
-                                    },
-                                );
-                            }
-                            None => {
-                                let e = format!(
-                                    "InsertSection: after_heading '{}' not found. Existing headings: [{}]",
-                                    h,
-                                    list_headings(&sections)
-                                );
-                                tracing::warn!(error = %e, "[wiki] Skipping op with unmatched heading");
-                                errors.push(e);
-                            }
-                        }
+            } => match after_heading {
+                Some(h) => match find_section_idx(&sections, h) {
+                    Some(idx) => {
+                        // Inherit the level of the anchor section so that
+                        // inserting after an H3 produces another H3, not H2.
+                        let level = sections[idx].level;
+                        let insert_idx = after_subtree_idx(&sections, idx);
+                        sections.insert(
+                            insert_idx,
+                            Section {
+                                level,
+                                heading: heading.clone(),
+                                body: ensure_trailing_blank(content),
+                            },
+                        );
                     }
                     None => {
-                        sections.push(Section {
-                            level: 2,
-                            heading: heading.clone(),
-                            body: ensure_trailing_blank(content),
-                        });
+                        let msg = format!(
+                            "InsertSection: after_heading '{}' not found. Existing headings: [{}]",
+                            h,
+                            list_headings(&sections)
+                        );
+                        tracing::warn!(error = %msg, "[wiki] Skipping op with unmatched heading");
+                        skipped.push(msg);
                     }
+                },
+                None => {
+                    sections.push(Section {
+                        level: 2,
+                        heading: heading.clone(),
+                        body: ensure_trailing_blank(content),
+                    });
                 }
-            }
+            },
         }
     }
 
-    // A partially applied proposal is not safe to save: accepting it would
-    // advance the wiki baseline for all selected sources even though facts
-    // covered by skipped ops never landed in the article.
-    if !errors.is_empty() {
-        return Err(errors.remove(0));
+    // Hard-error only when every meaningful op was skipped.
+    if meaningful > 0 && skipped.len() == meaningful {
+        return Err(skipped.join("; "));
     }
 
     Ok(serialize_sections(&preamble, &sections))
@@ -237,8 +234,9 @@ fn after_subtree_idx(sections: &[Section], anchor_idx: usize) -> usize {
 }
 
 /// Parse the article into (preamble, sections). The preamble is any content
-/// before the first `##` heading. Only `##` (level 2) headings begin new
-/// sections; `###` and deeper stay embedded in their parent section's body.
+/// before the first heading at level 2–6. Headings at levels 2–6 each begin a
+/// new section; H1 stays in the preamble; content under an H3+ heading belongs
+/// to that section's own body, not its parent's.
 fn parse_sections(content: &str) -> (String, Vec<Section>) {
     let mut preamble = String::new();
     let mut sections: Vec<Section> = Vec::new();
@@ -488,9 +486,8 @@ Status body.
     }
 
     #[test]
-    fn h3_heading_becomes_its_own_section() {
-        // After the multi-level parse change, ### Subsection is an addressable
-        // section rather than being swallowed into the ## Details body.
+    fn h3_sections_are_their_own_sections() {
+        // ### Subsection is now a first-class section, not embedded in Details.
         let (_, sections) = parse_sections(SAMPLE);
         let headings: Vec<&str> = sections.iter().map(|s| s.heading.as_str()).collect();
         assert_eq!(
@@ -500,7 +497,7 @@ Status body.
         let sub = sections.iter().find(|s| s.heading == "Subsection").unwrap();
         assert_eq!(sub.level, 3);
         assert!(sub.body.contains("Subsection text."));
-        // Details body must NOT include the H3 heading line any more.
+        // Details body must NOT contain the subsection heading any more.
         let details = sections.iter().find(|s| s.heading == "Details").unwrap();
         assert!(!details.body.contains("### Subsection"));
     }
@@ -671,21 +668,99 @@ Status body.
         assert_eq!(ops, roundtrip);
     }
 
-    // ── Multi-level heading tests ────────────────────────────────────────────
+    const MULTI_LEVEL: &str = "\
+## Parent A\n\
+\n\
+Parent A body.\n\
+\n\
+### Child A1\n\
+\n\
+Child A1 body.\n\
+\n\
+### Child A2\n\
+\n\
+Child A2 body.\n\
+\n\
+## Parent B\n\
+\n\
+Parent B body.\n\
+";
 
     #[test]
     fn append_to_h3_section() {
         let ops = vec![WikiSectionOp::AppendToSection {
-            heading: "Subsection".to_string(),
-            content: "New subsection detail [4].".to_string(),
+            heading: "Child A1".to_string(),
+            content: "New A1 line [3].".to_string(),
         }];
-        let out = apply_section_ops(SAMPLE, &ops).unwrap();
-        assert!(out.contains("### Subsection\n\nSubsection text."));
-        assert!(out.contains("New subsection detail [4]."));
-        // Parent H2 section and sibling sections must be byte-identical.
-        assert!(out.contains("## Details\n\nDetails body."));
-        assert!(out.contains("## Overview\n\nOverview body with [1] citation."));
+        let out = apply_section_ops(MULTI_LEVEL, &ops).unwrap();
+        assert!(out.contains("Child A1 body."));
+        assert!(out.contains("New A1 line [3]."));
+        // Child A2 and Parent B are untouched.
+        assert!(out.contains("### Child A2\n\nChild A2 body."));
+        assert!(out.contains("## Parent B\n\nParent B body."));
     }
+
+    #[test]
+    fn serialize_preserves_levels() {
+        // Round-trip with NoChange must produce byte-identical output.
+        let out = apply_section_ops(MULTI_LEVEL, &[WikiSectionOp::NoChange]).unwrap();
+        assert_eq!(out.trim(), MULTI_LEVEL.trim());
+    }
+
+    #[test]
+    fn insert_section_after_h3_inherits_level() {
+        let ops = vec![WikiSectionOp::InsertSection {
+            after_heading: Some("Child A1".to_string()),
+            heading: "Child A1a".to_string(),
+            content: "A1a body.".to_string(),
+        }];
+        let out = apply_section_ops(MULTI_LEVEL, &ops).unwrap();
+        // New section must be emitted as ### (level 3), not ## (level 2).
+        assert!(out.contains("### Child A1a\n\nA1a body."));
+        // It appears between Child A1 and Child A2.
+        let a1_pos = out.find("### Child A1\n").unwrap();
+        let a1a_pos = out.find("### Child A1a").unwrap();
+        let a2_pos = out.find("### Child A2").unwrap();
+        assert!(a1_pos < a1a_pos);
+        assert!(a1a_pos < a2_pos);
+    }
+
+    #[test]
+    fn apply_section_ops_tolerates_single_bad_op() {
+        // One valid op + one hallucinated heading: valid op must land.
+        let ops = vec![
+            WikiSectionOp::AppendToSection {
+                heading: "Nonexistent".to_string(),
+                content: "ghost content".to_string(),
+            },
+            WikiSectionOp::AppendToSection {
+                heading: "Overview".to_string(),
+                content: "real addition [3].".to_string(),
+            },
+        ];
+        let out = apply_section_ops(SAMPLE, &ops).unwrap();
+        assert!(out.contains("real addition [3]."));
+        assert!(!out.contains("ghost content"));
+    }
+
+    #[test]
+    fn apply_section_ops_aborts_when_all_ops_invalid() {
+        let ops = vec![
+            WikiSectionOp::AppendToSection {
+                heading: "Ghost1".to_string(),
+                content: "c1".to_string(),
+            },
+            WikiSectionOp::AppendToSection {
+                heading: "Ghost2".to_string(),
+                content: "c2".to_string(),
+            },
+        ];
+        let err = apply_section_ops(SAMPLE, &ops).unwrap_err();
+        assert!(err.contains("Ghost1"));
+        assert!(err.contains("Ghost2"));
+    }
+
+    // Tests using SAMPLE's existing ### Subsection
 
     #[test]
     fn replace_h3_section() {
@@ -706,7 +781,6 @@ Status body.
             content: "More sub content [4].".to_string(),
         }];
         let out = apply_section_ops(SAMPLE, &ops).unwrap();
-        // Inserted section inherits level 3 from the H3 anchor.
         assert!(out.contains("### Another Sub\n\nMore sub content [4]."));
         let sub_pos = out.find("### Subsection").unwrap();
         let another_pos = out.find("### Another Sub").unwrap();
@@ -743,44 +817,6 @@ Status body.
         assert!(details_pos < subsection_pos);
         assert!(subsection_pos < follow_up_pos);
         assert!(follow_up_pos < status_pos);
-    }
-
-    // ── Unmatched heading tests ─────────────────────────────────────────────
-
-    #[test]
-    fn unmatched_heading_rejects_mixed_valid_and_invalid_ops() {
-        // One hallucinated heading + one valid op must reject the whole
-        // proposal. Saving a partial merge would advance the wiki baseline for
-        // sources that were never incorporated.
-        let ops = vec![
-            WikiSectionOp::AppendToSection {
-                heading: "Nonexistent Section".to_string(),
-                content: "should be dropped".to_string(),
-            },
-            WikiSectionOp::AppendToSection {
-                heading: "Overview".to_string(),
-                content: "Valid addition [3].".to_string(),
-            },
-        ];
-        let err = apply_section_ops(SAMPLE, &ops).unwrap_err();
-        assert!(err.contains("Nonexistent Section"));
-    }
-
-    #[test]
-    fn unmatched_heading_rejects_even_when_append_to_end_insert_is_valid() {
-        let ops = vec![
-            WikiSectionOp::InsertSection {
-                after_heading: None,
-                heading: "Appendix".to_string(),
-                content: "Appendix content [3].".to_string(),
-            },
-            WikiSectionOp::AppendToSection {
-                heading: "Nonexistent Section".to_string(),
-                content: "should be dropped".to_string(),
-            },
-        ];
-        let err = apply_section_ops(SAMPLE, &ops).unwrap_err();
-        assert!(err.contains("Nonexistent Section"));
     }
 
     #[test]

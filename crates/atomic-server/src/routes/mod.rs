@@ -21,6 +21,7 @@ pub mod settings;
 pub mod setup;
 pub mod utils;
 pub mod wiki;
+pub mod health;
 
 use actix_web::web;
 
@@ -50,6 +51,7 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
         web::post().to(atoms::process_atom_pipeline),
     );
     cfg.route("/atoms/{id}", web::delete().to(atoms::delete_atom));
+    cfg.route("/atoms/{id}/lock", web::post().to(atoms::set_atom_locked));
     cfg.route("/atoms/{id}/similar", web::get().to(search::find_similar));
     cfg.route(
         "/atoms/{id}/embedding-status",
@@ -360,4 +362,33 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
 
     // Logs
     cfg.route("/logs", web::get().to(logs::get_logs));
+
+    // Health
+    cfg.route("/health/knowledge", web::get().to(health::get_health_knowledge));
+    cfg.route("/health/fix", web::post().to(health::run_health_fix));
+    cfg.route(
+        "/health/fix/{check}/{item_id}",
+        web::post().to(health::apply_manual_fix),
+    );
+    cfg.route("/health/undo/{fix_id}", web::post().to(health::undo_health_fix));
+    cfg.route("/health/history", web::get().to(health::get_health_history));
+    cfg.route("/health/fixes/recent", web::get().to(health::get_recent_fixes));
+    cfg.route("/health/check/{check_name}", web::post().to(health::compute_single_check));
+    cfg.route("/health/contradiction-summary/{atom_a}/{atom_b}", web::post().to(health::contradiction_summary_handler));
+    cfg.route("/health/fix/batch", web::post().to(health::apply_manual_fix_batch));
+    cfg.route("/health/strip-boilerplate/{atom_id}", web::post().to(health::strip_boilerplate_handler));
+    cfg.route("/health/broken-link-suggest", web::get().to(health::broken_link_suggest_handler));
+    cfg.route("/health/broken-links/auto-resolve-all", web::post().to(health::broken_links_auto_resolve_all));
+    cfg.route("/health/verify/{check}", web::post().to(health::verify_batch_handler));
+    cfg.route("/health/tag-proposal", web::post().to(health::create_tag_proposal));
+    cfg.route("/health/tag-proposal/latest", web::get().to(health::get_latest_tag_proposal));
+    cfg.route("/health/tag-proposal/manual", web::post().to(health::apply_manual_tag_actions));
+    cfg.route("/health/tag-proposal/{proposal_id}/apply", web::post().to(health::apply_tag_proposal));
+    cfg.route("/health/config", web::get().to(health::get_health_config));
+    cfg.route("/health/config", web::put().to(health::set_health_config));
+    cfg.route("/wiki/excluded-tags", web::get().to(health::get_wiki_excluded_tags));
+    cfg.route("/wiki/excluded-tags", web::put().to(health::set_wiki_excluded_tags));
+    cfg.route("/health/custom-checks", web::get().to(health::get_custom_health_checks));
+    cfg.route("/health/custom-checks", web::put().to(health::set_custom_health_checks));
+    cfg.route("/health/custom-checks/preview", web::post().to(health::preview_custom_health_check));
 }

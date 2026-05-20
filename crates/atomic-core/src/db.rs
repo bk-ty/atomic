@@ -211,7 +211,7 @@ impl Database {
     ///   1. Add a new `if version < N` block at the end (before the virtual-table section)
     ///   2. End the block with `PRAGMA user_version = N;`
     ///   3. Bump LATEST_VERSION
-    const LATEST_VERSION: i32 = 17;
+    const LATEST_VERSION: i32 = 23;
 
     pub fn run_migrations(conn: &Connection) -> Result<(), AtomicCoreError> {
         Self::run_migrations_internal(conn, false)
@@ -858,7 +858,142 @@ impl Database {
                 }
             }
 
-            conn.execute_batch(&format!("PRAGMA user_version = {};", Self::LATEST_VERSION))?;
+            conn.execute_batch("PRAGMA user_version = 17;")?;
+        }
+
+        // --- V17 → V18: Knowledge health tables ---
+        if version < 18 {
+            conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS health_reports (
+                    id TEXT PRIMARY KEY,
+                    computed_at TEXT NOT NULL,
+                    overall_score INTEGER NOT NULL,
+                    check_scores TEXT NOT NULL,
+                    atom_count INTEGER NOT NULL,
+                    auto_fixes_applied INTEGER NOT NULL DEFAULT 0,
+                    report_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_health_reports_computed
+                    ON health_reports(computed_at DESC);
+
+                CREATE TABLE IF NOT EXISTS health_fix_log (
+                    id TEXT PRIMARY KEY,
+                    check_name TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    tier TEXT NOT NULL,
+                    atom_ids TEXT,
+                    tag_ids TEXT,
+                    before_state TEXT NOT NULL DEFAULT '{}',
+                    after_state TEXT NOT NULL DEFAULT '{}',
+                    llm_prompt TEXT,
+                    llm_response TEXT,
+                    executed_at TEXT NOT NULL,
+                    undone_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_health_fix_log_executed
+                    ON health_fix_log(executed_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_health_fix_log_check
+                    ON health_fix_log(check_name);
+
+                PRAGMA user_version = 18;
+                "#,
+            )?;
+        }
+
+        // --- V18 → V19: content_hash column on atom_chunks for boilerplate detection ---
+        if version < 19 {
+            // ALTER TABLE ADD COLUMN has no IF NOT EXISTS in SQLite; ignore the error
+            // if the column was already added (e.g. during a test migration re-run).
+            let _ = conn.execute(
+                "ALTER TABLE atom_chunks ADD COLUMN content_hash TEXT",
+                [],
+            );
+            conn.execute_batch(
+                r#"
+                CREATE INDEX IF NOT EXISTS idx_atom_chunks_content_hash
+                    ON atom_chunks(content_hash);
+                PRAGMA user_version = 19;
+                "#,
+            )?;
+        }
+
+        // --- V19 → V20: persistent dismissals for the review queue ---
+        if version < 20 {
+            conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS health_dismissals (
+                    id TEXT PRIMARY KEY,
+                    check_name TEXT NOT NULL,
+                    item_key TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    dismissed_at TEXT NOT NULL,
+                    expires_at TEXT
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_health_dismissals_lookup
+                    ON health_dismissals(check_name, item_key);
+                PRAGMA user_version = 20;
+                "#,
+            )?;
+        }
+
+        // --- V20 → V21: tag_proposals table ---
+        if version < 21 {
+            conn.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS tag_proposals (
+                    id TEXT PRIMARY KEY,
+                    summary TEXT NOT NULL,
+                    actions_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    applied_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_tag_proposals_created
+                    ON tag_proposals(created_at DESC);
+                PRAGMA user_version = 21;
+                "#,
+            )?;
+        }
+
+        // --- V21 → V22: atoms.is_locked flag ---
+        //
+        // Locked atoms are protected from automated mutation by health fixes
+        // (strip-boilerplate, auto-merge-duplicate, auto-resolve-contradiction,
+        // relink-broken-link). They remain readable and editable through the
+        // normal UI. Use for source-of-truth material (books, studies, primary
+        // research) where automated "correction" would do more harm than good.
+        if version < 22 {
+            // ALTER TABLE ADD COLUMN has no IF NOT EXISTS in SQLite. Ignore the
+            // "duplicate column" error so migration stays idempotent when a
+            // test resets user_version to a pre-V22 value on a DB whose table
+            // was already migrated by the initial open.
+            let _ = conn.execute(
+                "ALTER TABLE atoms ADD COLUMN is_locked INTEGER NOT NULL DEFAULT 0",
+                [],
+            );
+            conn.execute_batch("PRAGMA user_version = 22;")?;
+        }
+
+        // --- V22 → V23: Store feed item title and link for source suggestions ---
+        if version < 23 {
+            // Ignore duplicate-column errors so the migration is idempotent.
+            let _ = conn.execute(
+                "ALTER TABLE feed_items ADD COLUMN item_title TEXT",
+                [],
+            );
+            let _ = conn.execute(
+                "ALTER TABLE feed_items ADD COLUMN item_link TEXT",
+                [],
+            );
+            // Backfill from atoms that are still live — preserves title/link
+            // so that if the atom is later deleted the feed item retains them.
+            conn.execute_batch(
+                "UPDATE feed_items
+                 SET item_title = (SELECT title FROM atoms WHERE id = feed_items.atom_id),
+                     item_link  = (SELECT source_url FROM atoms WHERE id = feed_items.atom_id)
+                 WHERE atom_id IS NOT NULL AND item_title IS NULL;
+                 PRAGMA user_version = 23;"
+            )?;
         }
 
         // --- Triggers (recreated every startup to stay current) ---
@@ -1056,6 +1191,40 @@ impl Database {
         // Registry-backed opens run the V14→V15 cleanup above to purge any
         // legacy seed rows so the resolver's "any per-DB row is an override"
         // rule stays correct.
+
+        // ---------------------------------------------------------------
+        // Self-healing: idempotent column checks.
+        //
+        // Runs on every migration pass regardless of version. Exists because
+        // a rebase/renumber in the past let some DBs tick their user_version
+        // past the migration that added `tags.autotag_description` without
+        // ever executing the ALTER. Any query joining that column then errors
+        // at runtime ("no such column: t.autotag_description"). Cheap enough
+        // to always verify; keeps migration drift from bricking a DB.
+        //
+        // When adding a new column, prefer listing it here in addition to the
+        // versioned migration step — belt and braces.
+        const EXPECTED_COLUMNS: &[(&str, &str, &str)] = &[
+            // (table, column, DDL to add)
+            ("tags", "autotag_description", "ALTER TABLE tags ADD COLUMN autotag_description TEXT NOT NULL DEFAULT ''"),
+        ];
+        for (table, column, ddl) in EXPECTED_COLUMNS {
+            let has_col: bool = conn
+                .query_row(
+                    "SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2",
+                    rusqlite::params![table, column],
+                    |_| Ok(true),
+                )
+                .unwrap_or(false);
+            if !has_col {
+                tracing::warn!(
+                    table,
+                    column,
+                    "healing missing column (migration drift); running late ALTER"
+                );
+                conn.execute_batch(ddl)?;
+            }
+        }
 
         Ok(())
     }

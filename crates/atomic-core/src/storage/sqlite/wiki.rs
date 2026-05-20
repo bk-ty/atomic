@@ -145,6 +145,17 @@ impl SqliteStorage {
     ) -> StorageResult<(Vec<ChunkWithContext>, i32)> {
         let conn = self.db.read_conn()?;
 
+        // Load per-DB wiki-excluded tag ids from settings (may be empty).
+        let excluded_tag_ids: Vec<String> = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'wiki_excluded_tag_ids'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+            .unwrap_or_default();
+
         // Get all descendant tag IDs (including the tag itself)
         let all_tag_ids =
             wiki::get_tag_hierarchy(&conn, tag_id).map_err(|e| AtomicCoreError::Wiki(e))?;
@@ -197,6 +208,7 @@ impl SqliteStorage {
                 centroid,
                 &scoped_atom_ids,
                 max_source_tokens,
+                &excluded_tag_ids,
             )
             .map_err(|e| AtomicCoreError::Wiki(e))?
         } else {
@@ -232,6 +244,17 @@ impl SqliteStorage {
         max_source_tokens: usize,
     ) -> StorageResult<Option<(Vec<ChunkWithContext>, i32)>> {
         let conn = self.db.read_conn()?;
+
+        // Load per-DB wiki-excluded tag ids from settings (may be empty).
+        let excluded_tag_ids: Vec<String> = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'wiki_excluded_tag_ids'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+            .unwrap_or_default();
 
         // Get atoms added after the last update, spanning the full tag hierarchy
         // (same scope as generation and get_article_status — prevents "N new atoms"
@@ -280,6 +303,7 @@ impl SqliteStorage {
                 centroid,
                 &new_atom_id_set,
                 max_source_tokens,
+                &excluded_tag_ids,
             )
             .map_err(|e| AtomicCoreError::Wiki(e))?
         } else {
@@ -301,15 +325,8 @@ impl SqliteStorage {
             .map_err(|e| AtomicCoreError::Wiki(e))?;
         }
 
-        if new_chunks.is_empty() {
-            return Err(AtomicCoreError::Wiki(
-                "New atoms are not ready for wiki update yet; chunking or embedding is still pending"
-                    .to_string(),
-            ));
-        }
-
-        // Count uses the same descendant CTE as get_article_status so the
-        // stored atom_count stays in sync with what the banner reports.
+        // Count atoms in the full descendant tree — needed for both the
+        // "not ready" early return and the normal return.
         let atom_count: i32 = conn
             .query_row(
                 "WITH RECURSIVE descendant_tags(id) AS (
@@ -324,6 +341,14 @@ impl SqliteStorage {
                 |row| row.get(0),
             )
             .map_err(|e| AtomicCoreError::Wiki(format!("Failed to count atoms: {}", e)))?;
+
+        if new_chunks.is_empty() {
+            // New atoms were found but none have been embedded yet.
+            // Return Some with empty chunks as a "not ready" signal so the
+            // caller can distinguish this from "no new atoms at all" and
+            // avoid advancing updated_at past the atoms' created_at.
+            return Ok(Some((vec![], atom_count)));
+        }
 
         Ok(Some((new_chunks, atom_count)))
     }

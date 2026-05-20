@@ -713,4 +713,120 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     method: 'GET',
     path: '/api/logs',
   },
+
+  // ==================== Health ====================
+  get_health_knowledge: {
+    method: 'GET',
+    path: '/api/health/knowledge',
+  },
+  run_health_fix: {
+    method: 'POST',
+    path: '/api/health/fix',
+    argsMode: 'body',
+  },
+  undo_health_fix: {
+    method: 'POST',
+    path: (a) => `/api/health/undo/${encodeURIComponent(a.fixId as string)}`,
+  },
+  get_health_history: {
+    method: 'GET',
+    path: '/api/health/history',
+    argsMode: 'query',
+  },
+  get_recent_health_fixes: {
+    method: 'GET',
+    path: '/api/health/fixes/recent',
+    argsMode: 'query',
+  },
+  apply_health_item_fix: {
+    method: 'POST',
+    path: (a) => `/api/health/fix/${encodeURIComponent(a.check as string)}/${encodeURIComponent(a.item_id as string)}`,
+    argsMode: 'body',
+  },
+  health_contradiction_summary: {
+    method: 'POST',
+    path: (a) => `/api/health/contradiction-summary/${encodeURIComponent(a.atom_a as string)}/${encodeURIComponent(a.atom_b as string)}`,
+  },
+  health_check_single: {
+    method: 'POST' as const,
+    path: (a: Record<string, unknown>) => `/api/health/check/${encodeURIComponent(a.check_name as string)}`,
+  },
+  health_strip_boilerplate: {
+    method: 'POST' as const,
+    path: (a: Record<string, unknown>) => `/api/health/strip-boilerplate/${encodeURIComponent(String(a.atom_id))}${a.dry_run ? '?dry_run=true' : ''}`,
+  },
+  health_broken_link_suggest: {
+    method: 'GET' as const,
+    path: (args: Record<string, unknown>) => `/api/health/broken-link-suggest?q=${encodeURIComponent(String(args.q))}&limit=${args.limit ?? 5}`,
+  },
+  health_broken_links_auto_resolve_all: {
+    method: 'POST' as const,
+    path: '/api/health/broken-links/auto-resolve-all',
+    argsMode: 'body' as const,
+  },
+  health_fix_batch: {
+    method: 'POST' as const,
+    path: () => `/api/health/fix/batch`,
+    argsMode: 'body' as const,
+  },
+  health_verify_batch: {
+    method: 'POST' as const,
+    path: (a: Record<string, unknown>) => `/api/health/verify/${encodeURIComponent(String(a.check))}`,
+    argsMode: 'body' as const,
+  },
+  health_tag_proposal_create: {
+    method: 'POST' as const,
+    path: '/api/health/tag-proposal',
+    argsMode: 'body' as const,
+  },
+  health_tag_proposal_latest: {
+    method: 'GET' as const,
+    path: '/api/health/tag-proposal/latest',
+  },
+  health_tag_proposal_apply: {
+    method: 'POST' as const,
+    path: (a: Record<string, unknown>) => `/api/health/tag-proposal/${encodeURIComponent(String(a.proposal_id))}/apply`,
+    argsMode: 'body' as const,
+  },
+  get_health_config: {
+    method: 'GET' as const,
+    path: '/api/health/config',
+  },
+  set_health_config: {
+    method: 'PUT' as const,
+    path: '/api/health/config',
+    argsMode: 'body' as const,
+  },
+  set_atom_locked: {
+    method: 'POST' as const,
+    path: (a) => `/api/atoms/${encodeURIComponent(String(a.atom_id))}/lock`,
+    argsMode: 'body' as const,
+    transformArgs: (a) => ({ locked: a.locked }),
+  },
+  get_wiki_excluded_tags: {
+    method: 'GET' as const,
+    path: '/api/wiki/excluded-tags',
+  },
+  set_wiki_excluded_tags: {
+    method: 'PUT' as const,
+    path: '/api/wiki/excluded-tags',
+    argsMode: 'body' as const,
+    transformArgs: (a) => ({ tag_ids: a.tag_ids }),
+  },
+  get_custom_health_checks: {
+    method: 'GET' as const,
+    path: '/api/health/custom-checks',
+  },
+  set_custom_health_checks: {
+    method: 'PUT' as const,
+    path: '/api/health/custom-checks',
+    argsMode: 'body' as const,
+    transformArgs: (a) => ({ checks: a.checks }),
+  },
+  preview_custom_health_check: {
+    method: 'POST' as const,
+    path: '/api/health/custom-checks/preview',
+    argsMode: 'body' as const,
+    transformArgs: (a) => ({ rule: a.rule }),
+  },
 };

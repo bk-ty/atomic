@@ -382,18 +382,26 @@ impl FeedStore for PostgresStorage {
         Ok(())
     }
 
-    async fn claim_feed_item(&self, feed_id: &str, guid: &str) -> StorageResult<bool> {
+    async fn claim_feed_item(
+        &self,
+        feed_id: &str,
+        guid: &str,
+        item_title: Option<&str>,
+        item_link: Option<&str>,
+    ) -> StorageResult<bool> {
         let now = chrono::Utc::now().to_rfc3339();
 
         let result = sqlx::query(
-            "INSERT INTO feed_items (feed_id, guid, skipped, seen_at, db_id)
-             VALUES ($1, $2, 0, $3, $4)
+            "INSERT INTO feed_items (feed_id, guid, skipped, seen_at, db_id, item_title, item_link)
+             VALUES ($1, $2, 0, $3, $4, $5, $6)
              ON CONFLICT DO NOTHING",
         )
         .bind(feed_id)
         .bind(guid)
         .bind(&now)
         .bind(&self.db_id)
+        .bind(item_title)
+        .bind(item_link)
         .execute(&self.pool)
         .await
         .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;

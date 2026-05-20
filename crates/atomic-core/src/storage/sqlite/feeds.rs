@@ -313,7 +313,13 @@ impl SqliteStorage {
         Ok(())
     }
 
-    pub(crate) fn claim_feed_item_sync(&self, feed_id: &str, guid: &str) -> StorageResult<bool> {
+    pub(crate) fn claim_feed_item_sync(
+        &self,
+        feed_id: &str,
+        guid: &str,
+        item_title: Option<&str>,
+        item_link: Option<&str>,
+    ) -> StorageResult<bool> {
         let conn = self
             .db
             .conn
@@ -321,9 +327,9 @@ impl SqliteStorage {
             .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
         let now = chrono::Utc::now().to_rfc3339();
         let changes = conn.execute(
-            "INSERT OR IGNORE INTO feed_items (feed_id, guid, skipped, seen_at)
-             VALUES (?1, ?2, 0, ?3)",
-            rusqlite::params![feed_id, guid, &now],
+            "INSERT OR IGNORE INTO feed_items (feed_id, guid, skipped, seen_at, item_title, item_link)
+             VALUES (?1, ?2, 0, ?3, ?4, ?5)",
+            rusqlite::params![feed_id, guid, &now, item_title, item_link],
         )?;
         Ok(changes > 0)
     }
@@ -435,8 +441,14 @@ impl FeedStore for SqliteStorage {
         self.mark_feed_polled_sync(id, error)
     }
 
-    async fn claim_feed_item(&self, feed_id: &str, guid: &str) -> StorageResult<bool> {
-        self.claim_feed_item_sync(feed_id, guid)
+    async fn claim_feed_item(
+        &self,
+        feed_id: &str,
+        guid: &str,
+        item_title: Option<&str>,
+        item_link: Option<&str>,
+    ) -> StorageResult<bool> {
+        self.claim_feed_item_sync(feed_id, guid, item_title, item_link)
     }
 
     async fn complete_feed_item(
