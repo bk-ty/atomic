@@ -1125,13 +1125,33 @@ struct RawTagProposalResponse {
 pub async fn propose_tag_restructure(
     core: &AtomicCore,
 ) -> Result<crate::health::TagProposal, AtomicCoreError> {
-    // 1. Load flat tag list.
-    let tags = core.get_all_tags_filtered(0).await?;
+    // 1. Load full tag tree, then flatten depth-first so EVERY tag — not just the
+    //    top-level category roots — is visible to the LLM. The tree returned by
+    //    `get_all_tags_filtered` only exposes roots at the top level; descendants
+    //    are nested in `t.children`. Iterating `tags.iter()` directly used to send
+    //    only the 4-5 category roots and the LLM would correctly conclude the tree
+    //    was clean — because at the root level it always is.
+    let tag_tree = core.get_all_tags_filtered(0).await?;
+    let mut flat: Vec<&crate::TagWithCount> = Vec::new();
+    fn walk<'a>(nodes: &'a [crate::TagWithCount], out: &mut Vec<&'a crate::TagWithCount>) {
+        for n in nodes {
+            out.push(n);
+            walk(&n.children, out);
+        }
+    }
+    walk(&tag_tree, &mut flat);
 
-    // 2. Build compact JSON capped at 500 tags.
-    let mut tag_rows: Vec<serde_json::Value> = tags
+    // 2. Sort by atom_count desc so the most-relevant tags survive the cap, and
+    //    take a generous slice. 500 was the original cap; bump to 2000 — a healthy
+    //    KB has thousands of leaf tags after auto-tagging. Token budget is still
+    //    bounded by `with_max_tokens` on the LLM call below.
+    flat.sort_by(|a, b| b.atom_count.cmp(&a.atom_count));
+    let total_tags = flat.len();
+    let truncated = total_tags.saturating_sub(2000);
+    flat.truncate(2000);
+
+    let tag_rows: Vec<serde_json::Value> = flat
         .iter()
-        .take(500)
         .map(|t| {
             json!({
                 "id":               t.tag.id,
@@ -1142,15 +1162,8 @@ pub async fn propose_tag_restructure(
             })
         })
         .collect();
-    // Sort by atom_count desc so the most relevant tags appear first in the cap.
-    tag_rows.sort_by(|a, b| {
-        let ca = a["atom_count"].as_i64().unwrap_or(0);
-        let cb = b["atom_count"].as_i64().unwrap_or(0);
-        cb.cmp(&ca)
-    });
     let tag_tree_json = serde_json::to_string_pretty(&tag_rows)
         .unwrap_or_else(|_| "[]".to_string());
-
     // 3. Build prompt.
     let prompt = format!(
         "You are a knowledge-base curator.  Analyse the tag tree below and propose a \
@@ -1172,8 +1185,14 @@ Each action is one of:\n\
   {{\"kind\":\"rename\", \"tag_id\":\"<id>\", \"old_name\":\"<name>\", \"new_name\":\"<name>\", \"reason\":\"...\"}}\n\
   {{\"kind\":\"reparent\", \"tag_id\":\"<id>\", \"tag_name\":\"<name>\", \"new_parent_id\":null|\"<id>\", \"new_parent_name\":null|\"<name>\", \"reason\":\"...\"}}\n\
   {{\"kind\":\"delete\", \"tag_id\":\"<id>\", \"tag_name\":\"<name>\", \"reason\":\"...\"}}\n\n\
-Current tag tree ({count} tags):\n{tree}",
-        count = tag_rows.len(),
+Current tag tree ({shown} of {total} tags{truncation_note}):\n{tree}",
+        shown = tag_rows.len(),
+        total = total_tags,
+        truncation_note = if truncated > 0 {
+            format!(", {truncated} omitted by atom_count")
+        } else {
+            String::new()
+        },
         tree = tag_tree_json,
     );
 
