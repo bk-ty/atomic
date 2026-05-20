@@ -287,22 +287,42 @@ impl EmbeddingStrategy {
 
 /// Strategy used by the auto-tagging stage for an atom.
 ///
-/// `TruncatedFullContent` preserves today's cost-bounded behavior. The
-/// `ChunkAssisted` variant is a future hook for large atoms, where tagging can
-/// use already-persisted chunks from the embedding stage and consolidate the
-/// result back into atom-level tags.
+/// `TruncatedFullContent` is the cost-bounded LLM-only path. `ChunkAssisted`
+/// is a future hook that can use already-persisted chunks. `KnnThenLlm`
+/// (default) runs k-NN tag inheritance from the semantically-nearest existing
+/// atoms first, then falls back to the LLM extractor for anything the neighbor
+/// vote couldn't decide. `KnnOnly` skips the LLM entirely — useful for
+/// deterministic, zero-API-cost tagging once a reasonable tag corpus exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaggingStrategy {
     TruncatedFullContent,
     ChunkAssisted,
+    KnnThenLlm,
+    KnnOnly,
 }
 
 impl TaggingStrategy {
     fn from_settings(settings: &HashMap<String, String>) -> Self {
         match settings.get("tagging_strategy").map(|s| s.as_str()) {
             Some("chunk_assisted") => Self::ChunkAssisted,
-            _ => Self::TruncatedFullContent,
+            Some("knn_then_llm") => Self::KnnThenLlm,
+            Some("knn_only") => Self::KnnOnly,
+            Some("truncated_full_content") => Self::TruncatedFullContent,
+            _ => Self::KnnThenLlm,
         }
+    }
+
+    /// True when the strategy includes a k-NN inheritance step.
+    pub fn uses_knn(self) -> bool {
+        matches!(self, Self::KnnThenLlm | Self::KnnOnly)
+    }
+
+    /// True when the strategy invokes the LLM tag extractor.
+    pub fn uses_llm(self) -> bool {
+        matches!(
+            self,
+            Self::TruncatedFullContent | Self::ChunkAssisted | Self::KnnThenLlm
+        )
     }
 }
 
@@ -756,115 +776,198 @@ async fn process_tagging_only_inner(
     let provider_config = ProviderConfig::from_settings(&settings_map);
     let tagging_strategy = TaggingStrategy::from_settings(&settings_map);
 
-    // Validate provider for LLM
-    if provider_config.provider_type == ProviderType::OpenRouter
-        && provider_config.openrouter_api_key.is_none()
-    {
-        tracing::warn!(atom_id = %atom_id, "OpenRouter selected but no API key configured; skipping tagging");
-        storage
-            .set_tagging_status_sync(atom_id, "skipped", None)
-            .await
-            .map_err(|e| e.to_string())?;
-        return Ok(TaggingOutcome::Skipped);
-    }
+    // Tags accumulated across all enabled strategy steps. The k-NN helper
+    // links its picks to the atom directly; the LLM branch does the same
+    // through `link_tags_to_atom_impl` at the end. Both paths are idempotent
+    // (INSERT OR IGNORE), so the trailing batch link is safe even when k-NN
+    // already persisted those rows.
+    let mut all_tag_ids: Vec<String> = Vec::new();
 
-    let tagging_model = provider_config.llm_model().to_string();
-    tracing::info!(
-        atom_id = %atom_id,
-        provider = ?provider_config.provider_type,
-        model = %tagging_model,
-        "Starting auto-tagging"
-    );
-
-    // Read raw content directly from atoms table — no dependency on embedding
-    let content = storage
-        .get_atom_content_impl(atom_id)
-        .await
-        .map_err(|e| format!("Failed to get atom content: {}", e))?
-        .ok_or_else(|| format!("Atom not found: {}", atom_id))?;
-
-    if content.trim().is_empty() {
-        tracing::info!(atom_id = %atom_id, "Auto-tagging skipped because atom content is empty");
-        storage
-            .set_tagging_status_sync(atom_id, "skipped", None)
-            .await
-            .map_err(|e| e.to_string())?;
-        return Ok(TaggingOutcome::Skipped);
-    }
-
-    // Load model capabilities (uses in-memory + DB cache to avoid redundant fetches)
-    let supported_params: Option<Vec<String>> =
-        if provider_config.provider_type == ProviderType::OpenRouter {
-            // Try to load capabilities from the settings cache
-            let cached_json = storage
-                .get_setting_sync("model_capabilities_cache")
-                .await
-                .ok()
-                .flatten();
-            let capabilities = if let Some(json) = cached_json {
-                serde_json::from_str::<crate::providers::models::ModelCapabilitiesCache>(&json).ok()
-            } else {
-                None
-            };
-
-            capabilities.and_then(|caps| caps.get_supported_params(&tagging_model).cloned())
-        } else {
-            None
-        };
-
-    // Get tag tree for LLM context (only top-level tags flagged as auto-tag targets)
-    let tag_tree_json = storage
-        .get_tag_tree_for_llm_impl()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // No auto-tag targets configured — skip tagging entirely.
-    // The user has either unflagged all defaults during onboarding or hasn't created any.
-    if tag_tree_json == "(no existing tags)" {
-        tracing::info!(atom_id = %atom_id, "No tags flagged as auto-tag targets; skipping tagging (check Settings → Tagging)");
-        storage
-            .set_tagging_status_sync(atom_id, "skipped", None)
-            .await
-            .map_err(|e| e.to_string())?;
-        return Ok(TaggingOutcome::Skipped);
-    }
-
-    let custom_tagging_prompt = settings_map
-        .get("tagging_prompt")
-        .filter(|s| !s.is_empty())
-        .map(|s| s.as_str());
-    let tags = run_tagging_strategy(
-        tagging_strategy,
-        &provider_config,
-        &content,
-        &tag_tree_json,
-        &tagging_model,
-        supported_params,
-        custom_tagging_prompt,
-    )
-    .await?;
-
-    let mut all_tag_ids = Vec::new();
-
-    for tag_application in tags {
-        let trimmed_name = tag_application.name.trim();
-        if trimmed_name.is_empty() || trimmed_name.eq_ignore_ascii_case("null") {
-            continue;
-        }
-
-        match storage
-            .get_or_create_tag_impl(
-                &tag_application.name,
-                tag_application.parent_name.as_deref(),
-            )
-            .await
-        {
-            Ok(tag_id) => all_tag_ids.push(tag_id),
+    // ---- Step A: k-NN tag inheritance (deterministic, no LLM cost) ----
+    //
+    // Runs first when enabled so the LLM step can either short-circuit
+    // entirely (KnnOnly) or augment the high-confidence picks (KnnThenLlm).
+    // Failures here degrade gracefully: log a warning and fall through to
+    // the LLM branch instead of failing the whole atom.
+    if tagging_strategy.uses_knn() {
+        let knn_config = KnnTaggingConfig::from_settings(&settings_map);
+        match storage.knn_inherit_tags_sync(atom_id, knn_config).await {
+            Ok(tags) => {
+                if !tags.is_empty() {
+                    tracing::info!(
+                        atom_id = %atom_id,
+                        inherited = tags.len(),
+                        k = knn_config.k,
+                        min_consensus = knn_config.min_consensus,
+                        min_similarity = knn_config.min_similarity,
+                        "k-NN tag inheritance applied"
+                    );
+                }
+                all_tag_ids.extend(tags);
+            }
             Err(e) => {
-                tracing::error!(tag_name = %tag_application.name, error = %e, "Failed to get/create tag")
+                tracing::warn!(
+                    atom_id = %atom_id,
+                    error = %e,
+                    "k-NN tag inheritance failed; continuing with remaining strategy"
+                );
             }
         }
     }
+
+    // ---- Step B: LLM tag extraction ----
+    //
+    // Skipped entirely under `KnnOnly`. Under `KnnThenLlm`, an unavailable
+    // LLM (missing API key, empty content, no autotag targets) is non-fatal:
+    // we keep the k-NN tags and complete the atom. Under the LLM-only
+    // strategies we preserve the original "skip the whole atom" behavior so
+    // existing operators see no change unless they opt into the new path.
+    if tagging_strategy.uses_llm() {
+        let llm_only = !tagging_strategy.uses_knn();
+        let mut llm_runnable = true;
+
+
+
+        if provider_config.provider_type == ProviderType::OpenRouter
+            && provider_config.openrouter_api_key.is_none()
+        {
+            tracing::warn!(
+                atom_id = %atom_id,
+                "OpenRouter selected but no API key configured; skipping LLM tagging step"
+            );
+            if llm_only {
+                storage
+                    .set_tagging_status_sync(atom_id, "skipped", None)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                return Ok(TaggingOutcome::Skipped);
+            }
+            llm_runnable = false;
+        }
+
+        if llm_runnable {
+            let tagging_model = provider_config.llm_model().to_string();
+            tracing::info!(
+                atom_id = %atom_id,
+                provider = ?provider_config.provider_type,
+                model = %tagging_model,
+                "Starting LLM auto-tagging"
+            );
+
+            // Read raw content directly from atoms table — no dependency on
+            // embedding (chunks may have been pruned, but `atoms.content`
+            // is the source of truth).
+            let content = storage
+                .get_atom_content_impl(atom_id)
+                .await
+                .map_err(|e| format!("Failed to get atom content: {}", e))?
+                .ok_or_else(|| format!("Atom not found: {}", atom_id))?;
+
+            if content.trim().is_empty() {
+                if llm_only {
+                    tracing::info!(
+                        atom_id = %atom_id,
+                        "Auto-tagging skipped because atom content is empty"
+                    );
+                    storage
+                        .set_tagging_status_sync(atom_id, "skipped", None)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    return Ok(TaggingOutcome::Skipped);
+                }
+                tracing::info!(
+                    atom_id = %atom_id,
+                    "Empty content; skipping LLM step (k-NN tags retained)"
+                );
+            } else {
+                // Load model capabilities (uses in-memory + DB cache).
+                let supported_params: Option<Vec<String>> =
+                    if provider_config.provider_type == ProviderType::OpenRouter {
+                        let cached_json = storage
+                            .get_setting_sync("model_capabilities_cache")
+                            .await
+                            .ok()
+                            .flatten();
+                        let capabilities = if let Some(json) = cached_json {
+                            serde_json::from_str::<crate::providers::models::ModelCapabilitiesCache>(&json).ok()
+                        } else {
+                            None
+                        };
+                        capabilities
+                            .and_then(|caps| caps.get_supported_params(&tagging_model).cloned())
+                    } else {
+                        None
+                    };
+
+                // Tag tree for LLM context (only top-level autotag targets).
+                let tag_tree_json = storage
+                    .get_tag_tree_for_llm_impl()
+                    .await
+                    .map_err(|e| e.to_string())?;
+
+                if tag_tree_json == "(no existing tags)" {
+                    if llm_only {
+                        tracing::info!(
+                            atom_id = %atom_id,
+                            "No tags flagged as auto-tag targets; skipping tagging (check Settings → Tagging)"
+                        );
+                        storage
+                            .set_tagging_status_sync(atom_id, "skipped", None)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        return Ok(TaggingOutcome::Skipped);
+                    }
+                    tracing::info!(
+                        atom_id = %atom_id,
+                        "No auto-tag targets configured; skipping LLM step (k-NN tags retained)"
+                    );
+                } else {
+                    let custom_tagging_prompt = settings_map
+                        .get("tagging_prompt")
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.as_str());
+                    let tags = run_tagging_strategy(
+                        tagging_strategy,
+                        &provider_config,
+                        &content,
+                        &tag_tree_json,
+                        &tagging_model,
+                        supported_params,
+                        custom_tagging_prompt,
+                    )
+                    .await?;
+
+                    for tag_application in tags {
+                        let trimmed_name = tag_application.name.trim();
+                        if trimmed_name.is_empty()
+                            || trimmed_name.eq_ignore_ascii_case("null")
+                        {
+                            continue;
+                        }
+                        match storage
+                            .get_or_create_tag_impl(
+                                &tag_application.name,
+                                tag_application.parent_name.as_deref(),
+                            )
+                            .await
+                        {
+                            Ok(tag_id) => all_tag_ids.push(tag_id),
+                            Err(e) => {
+                                tracing::error!(
+                                    tag_name = %tag_application.name,
+                                    error = %e,
+                                    "Failed to get/create tag"
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    all_tag_ids.sort();
+    all_tag_ids.dedup();
 
     if !all_tag_ids.is_empty() {
         storage
@@ -873,19 +976,17 @@ async fn process_tagging_only_inner(
             .map_err(|e| e.to_string())?;
     }
 
-    // Set tagging status to complete
     storage
         .set_tagging_status_sync(atom_id, "complete", None)
         .await
         .map_err(|e| e.to_string())?;
 
-    all_tag_ids.sort();
-    all_tag_ids.dedup();
     let all_new_tag_ids = all_tag_ids.clone();
     tracing::info!(
         atom_id = %atom_id,
         tags_applied = all_tag_ids.len(),
         new_tags_created = all_new_tag_ids.len(),
+        strategy = ?tagging_strategy,
         "Auto-tagging complete"
     );
 
@@ -904,7 +1005,7 @@ async fn run_tagging_strategy(
     custom_system_prompt: Option<&str>,
 ) -> Result<Vec<crate::extraction::TagApplication>, String> {
     match strategy {
-        TaggingStrategy::TruncatedFullContent => {
+        TaggingStrategy::TruncatedFullContent | TaggingStrategy::KnnThenLlm => {
             extract_tags_from_content(
                 provider_config,
                 content,
@@ -928,6 +1029,12 @@ async fn run_tagging_strategy(
                 custom_system_prompt,
             )
             .await
+        }
+        TaggingStrategy::KnnOnly => {
+            // Caller is expected to gate on `strategy.uses_llm()`; this arm
+            // exists only so the match is exhaustive. Returning an empty
+            // tag list is a safe degenerate behavior either way.
+            Ok(Vec::new())
         }
     }
 }
@@ -2421,6 +2528,216 @@ pub fn compute_semantic_edges_for_atom(
     Ok(edges_created)
 }
 
+/// Configuration for [`knn_inherit_tags`]. Mirrors the user-facing settings.
+#[derive(Debug, Clone, Copy)]
+pub struct KnnTaggingConfig {
+    /// Number of nearest neighbor *atoms* (not chunks) to consider.
+    pub k: usize,
+    /// Minimum number of those k neighbors that must share a tag for it
+    /// to be inherited. Higher = more conservative.
+    pub min_consensus: usize,
+    /// Cosine-similarity floor for chunk-level matches feeding the vote.
+    /// Chunks below this similarity are ignored entirely.
+    pub min_similarity: f32,
+}
+
+impl Default for KnnTaggingConfig {
+    fn default() -> Self {
+        Self {
+            k: 10,
+            min_consensus: 3,
+            min_similarity: 0.55,
+        }
+    }
+}
+
+impl KnnTaggingConfig {
+    pub fn from_settings(settings: &HashMap<String, String>) -> Self {
+        let default = Self::default();
+        Self {
+            k: settings
+                .get("knn_tagging_k")
+                .and_then(|v| v.parse().ok())
+                .filter(|v: &usize| *v > 0)
+                .unwrap_or(default.k),
+            min_consensus: settings
+                .get("knn_tagging_min_consensus")
+                .and_then(|v| v.parse().ok())
+                .filter(|v: &usize| *v > 0)
+                .unwrap_or(default.min_consensus),
+            min_similarity: settings
+                .get("knn_tagging_min_similarity")
+                .and_then(|v| v.parse().ok())
+                .filter(|v: &f32| (-1.0..=1.0).contains(v))
+                .unwrap_or(default.min_similarity),
+        }
+    }
+}
+
+/// Apply tags to `atom_id` by majority vote across the `k` semantically
+/// nearest already-tagged atoms.
+///
+/// Algorithm:
+/// 1. Pull every chunk embedding for `atom_id` from `atom_chunks`.
+/// 2. For each, query `vec_chunks` for the nearest neighbor chunks.
+/// 3. Filter neighbor chunks below `min_similarity`; drop self-matches.
+/// 4. Score each neighbor *atom* by its single best chunk-level similarity.
+/// 5. Take the top `k` neighbor atoms, then count how many carry each tag.
+/// 6. Apply tags whose neighbor-count meets `min_consensus`.
+///
+/// Returns the list of tag IDs that cleared consensus and were linked.
+/// Empty result is meaningful — it tells the caller no tag was confidently
+/// derivable, so the LLM step (if enabled) should run.
+///
+/// Idempotent: `link_tags_to_atom` uses `INSERT OR IGNORE`, and we never
+/// remove existing tags. Safe to call repeatedly.
+pub fn knn_inherit_tags(
+    conn: &rusqlite::Connection,
+    atom_id: &str,
+    config: KnnTaggingConfig,
+) -> Result<Vec<String>, String> {
+    use std::collections::HashMap;
+
+    // Load the source atom's chunk embeddings. These were written by the
+    // embedding stage right before tagging — empty here means embedding
+    // didn't actually produce any chunks (very short atoms), so there is
+    // nothing to compare against.
+    let mut chunk_stmt = conn
+        .prepare("SELECT embedding FROM atom_chunks WHERE atom_id = ?1 AND embedding IS NOT NULL")
+        .map_err(|e| format!("Failed to prepare source-chunk query: {}", e))?;
+    let source_blobs: Vec<Vec<u8>> = chunk_stmt
+        .query_map([atom_id], |row| row.get::<_, Vec<u8>>(0))
+        .map_err(|e| format!("Failed to query source chunks: {}", e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to collect source chunks: {}", e))?;
+
+    if source_blobs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Inflate the per-chunk vec_chunks limit so that after self-filtering
+    // and atom-deduplication we still have enough candidates to fill `k`.
+    // 5x is the same multiplier `compute_semantic_edges_for_atom` uses.
+    let knn_limit = (config.k.saturating_mul(5)).max(config.k) as i64;
+
+    let mut vec_stmt = conn
+        .prepare(
+            "SELECT chunk_id, distance
+             FROM vec_chunks
+             WHERE embedding MATCH ?1
+             ORDER BY distance
+             LIMIT ?2",
+        )
+        .map_err(|e| format!("Failed to prepare vec_chunks query: {}", e))?;
+
+    // For each candidate atom, retain its best (highest) chunk-level similarity.
+    let mut atom_best_sim: HashMap<String, f32> = HashMap::new();
+
+    for blob in &source_blobs {
+        let candidates: Vec<(String, f32)> = vec_stmt
+            .query_map(rusqlite::params![blob, knn_limit], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f32>(1)?))
+            })
+            .map_err(|e| format!("Failed to run vec_chunks query: {}", e))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to collect vec_chunks rows: {}", e))?;
+
+        if candidates.is_empty() {
+            continue;
+        }
+
+        // Resolve chunk_id → atom_id in one batched lookup.
+        let chunk_ids: Vec<&str> = candidates.iter().map(|(id, _)| id.as_str()).collect();
+        let placeholders = chunk_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let info_query = format!(
+            "SELECT id, atom_id FROM atom_chunks WHERE id IN ({})",
+            placeholders
+        );
+        let mut info_stmt = conn
+            .prepare(&info_query)
+            .map_err(|e| format!("Failed to prepare chunk-lookup query: {}", e))?;
+        let chunk_to_atom: HashMap<String, String> = info_stmt
+            .query_map(rusqlite::params_from_iter(chunk_ids.iter()), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| format!("Failed to query chunk owners: {}", e))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        for (chunk_id, distance) in candidates {
+            let sim = distance_to_similarity(distance);
+            if sim < config.min_similarity {
+                continue;
+            }
+            let Some(neighbor_atom) = chunk_to_atom.get(&chunk_id) else {
+                continue;
+            };
+            if neighbor_atom == atom_id {
+                continue;
+            }
+            atom_best_sim
+                .entry(neighbor_atom.clone())
+                .and_modify(|prev| {
+                    if sim > *prev {
+                        *prev = sim;
+                    }
+                })
+                .or_insert(sim);
+        }
+    }
+
+    if atom_best_sim.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Take the top-k neighbor atoms by best chunk similarity.
+    let mut ranked: Vec<(String, f32)> = atom_best_sim.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.truncate(config.k);
+
+    let neighbor_ids: Vec<String> = ranked.into_iter().map(|(id, _)| id).collect();
+    if neighbor_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Tally: count how many of the k neighbors carry each tag.
+    let placeholders = neighbor_ids
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(",");
+    let tag_query = format!(
+        "SELECT tag_id, COUNT(DISTINCT atom_id) AS c
+         FROM atom_tags
+         WHERE atom_id IN ({})
+         GROUP BY tag_id",
+        placeholders
+    );
+    let mut tag_stmt = conn
+        .prepare(&tag_query)
+        .map_err(|e| format!("Failed to prepare neighbor-tag query: {}", e))?;
+    let tag_counts: Vec<(String, usize)> = tag_stmt
+        .query_map(rusqlite::params_from_iter(neighbor_ids.iter()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+        })
+        .map_err(|e| format!("Failed to run neighbor-tag query: {}", e))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to collect neighbor-tag rows: {}", e))?;
+
+    let chosen: Vec<String> = tag_counts
+        .into_iter()
+        .filter(|(_, c)| *c >= config.min_consensus)
+        .map(|(tag_id, _)| tag_id)
+        .collect();
+
+    if chosen.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    crate::extraction::link_tags_to_atom(conn, atom_id, &chosen)?;
+    Ok(chosen)
+}
+
 /// Process all atoms with 'pending' embedding status
 ///
 /// Fetches all pending atoms, marks them as 'processing', and processes them in batch.
@@ -2902,6 +3219,9 @@ pub async fn process_pending_edges(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Database;
+    use rusqlite::Connection;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_distance_to_similarity() {
@@ -2912,5 +3232,291 @@ mod tests {
         assert!((distance_to_similarity(std::f32::consts::SQRT_2) - 0.0).abs() < 0.001);
         // distance = 2.0 gives 1.0 - 2.0 = -1.0 (clamped)
         assert!((distance_to_similarity(2.0) - (-1.0)).abs() < 0.001);
+    }
+
+    // ==================== knn_inherit_tags ====================
+
+    fn open_test_db() -> (Database, NamedTempFile) {
+        let temp = NamedTempFile::new().unwrap();
+        let db = Database::open_or_create(temp.path()).unwrap();
+        (db, temp)
+    }
+
+    /// Insert an atom + a single chunk with the given embedding vector.
+    /// Returns the atom id.
+    fn seed_atom_with_embedding(conn: &Connection, embedding: &[f32]) -> String {
+        let atom_id = uuid::Uuid::new_v4().to_string();
+        let chunk_id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        let blob: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+
+        conn.execute(
+            "INSERT INTO atoms (id, content, created_at, updated_at, embedding_status, tagging_status)
+             VALUES (?1, ?2, ?3, ?3, 'complete', 'pending')",
+            rusqlite::params![&atom_id, "test content", &now],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO atom_chunks (id, atom_id, chunk_index, content, embedding) VALUES (?1, ?2, 0, ?3, ?4)",
+            rusqlite::params![&chunk_id, &atom_id, "test content", &blob],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO vec_chunks (chunk_id, embedding) VALUES (?1, ?2)",
+            rusqlite::params![&chunk_id, &blob],
+        )
+        .unwrap();
+
+        atom_id
+    }
+
+    /// Insert a top-level autotag-target tag and return its id.
+    fn seed_top_tag(conn: &Connection, name: &str) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO tags (id, name, parent_id, created_at, is_autotag_target) VALUES (?1, ?2, NULL, ?3, 1)",
+            rusqlite::params![&id, name, &now],
+        )
+        .unwrap();
+        id
+    }
+
+    /// Link a tag to an atom (raw, no checks).
+    fn link(conn: &Connection, atom_id: &str, tag_id: &str) {
+        conn.execute(
+            "INSERT INTO atom_tags (atom_id, tag_id) VALUES (?1, ?2)",
+            rusqlite::params![atom_id, tag_id],
+        )
+        .unwrap();
+    }
+
+    /// Build a 1536-dim vector by repeating the basis pattern. Used so tests
+    /// can construct vectors that are orthogonal/parallel without listing all
+    /// 1536 components.
+    fn vec_of(prefix: &[f32]) -> Vec<f32> {
+        let mut v = Vec::with_capacity(1536);
+        while v.len() < 1536 {
+            for &x in prefix {
+                v.push(x);
+                if v.len() == 1536 {
+                    break;
+                }
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn test_knn_inherit_tags_applies_consensus_tag() {
+        // Five neighbor atoms share the same embedding as the source and
+        // all carry tag `event`. One distractor atom has the opposite
+        // embedding and carries `noise`. With min_consensus=3, only `event`
+        // should be inherited.
+        let (db, _temp) = open_test_db();
+        let conn = db.conn.lock().unwrap();
+
+        let event_tag = seed_top_tag(&conn, "Event");
+        let noise_tag = seed_top_tag(&conn, "Noise");
+
+        let near = vec_of(&[1.0, 0.0]);
+        let far = vec_of(&[-1.0, 0.0]);
+
+        // Source atom — embedding identical to neighbors so similarity = 1.0
+        let source = seed_atom_with_embedding(&conn, &near);
+
+        for _ in 0..5 {
+            let nb = seed_atom_with_embedding(&conn, &near);
+            link(&conn, &nb, &event_tag);
+        }
+        let distractor = seed_atom_with_embedding(&conn, &far);
+        link(&conn, &distractor, &noise_tag);
+
+        let cfg = KnnTaggingConfig {
+            k: 10,
+            min_consensus: 3,
+            min_similarity: 0.55,
+        };
+        let applied = knn_inherit_tags(&conn, &source, cfg).unwrap();
+
+        assert_eq!(applied.len(), 1, "expected exactly one inherited tag");
+        assert_eq!(applied[0], event_tag);
+
+        // Verify it was actually persisted to atom_tags.
+        let count: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM atom_tags WHERE atom_id = ?1 AND tag_id = ?2",
+                [&source, &event_tag],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // The distractor's `noise` tag must not have been picked up.
+        let noise_applied: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM atom_tags WHERE atom_id = ?1 AND tag_id = ?2",
+                [&source, &noise_tag],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(noise_applied, 0, "orthogonal neighbor's tag must not propagate");
+    }
+
+    #[test]
+    fn test_knn_inherit_tags_below_consensus_is_no_op() {
+        // Only one neighbor shares the candidate tag; min_consensus=2 means
+        // we should apply nothing. Returning an empty Vec is the contract
+        // that lets the LLM step run.
+        let (db, _temp) = open_test_db();
+        let conn = db.conn.lock().unwrap();
+
+        let lone_tag = seed_top_tag(&conn, "Lone");
+        let near = vec_of(&[1.0, 0.0]);
+
+        let source = seed_atom_with_embedding(&conn, &near);
+        let only_neighbor = seed_atom_with_embedding(&conn, &near);
+        link(&conn, &only_neighbor, &lone_tag);
+
+        let cfg = KnnTaggingConfig {
+            k: 10,
+            min_consensus: 2,
+            min_similarity: 0.55,
+        };
+        let applied = knn_inherit_tags(&conn, &source, cfg).unwrap();
+
+        assert!(
+            applied.is_empty(),
+            "below-consensus tags must not be applied; got {:?}",
+            applied
+        );
+        let persisted: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM atom_tags WHERE atom_id = ?1",
+                [&source],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(persisted, 0);
+    }
+
+    #[test]
+    fn test_knn_inherit_tags_filters_below_similarity_floor() {
+        // The neighbor exists and shares a tag, but the embedding similarity
+        // is below `min_similarity`. The tag must not be inherited.
+        let (db, _temp) = open_test_db();
+        let conn = db.conn.lock().unwrap();
+
+        let tag = seed_top_tag(&conn, "Topic");
+        let near = vec_of(&[1.0, 0.0]);
+        let far = vec_of(&[-1.0, 0.0]); // similarity = 0.0 vs `near`
+
+        let source = seed_atom_with_embedding(&conn, &near);
+        for _ in 0..5 {
+            let nb = seed_atom_with_embedding(&conn, &far);
+            link(&conn, &nb, &tag);
+        }
+
+        let cfg = KnnTaggingConfig {
+            k: 10,
+            min_consensus: 1,
+            min_similarity: 0.55,
+        };
+        let applied = knn_inherit_tags(&conn, &source, cfg).unwrap();
+        assert!(
+            applied.is_empty(),
+            "tags from low-similarity neighbors must be filtered out"
+        );
+    }
+
+    #[test]
+    fn test_knn_inherit_tags_excludes_self() {
+        // The source atom carries its own tag. k-NN must not consider the
+        // source as one of its own neighbors, so a tag held only by the
+        // source must not clear consensus.
+        let (db, _temp) = open_test_db();
+        let conn = db.conn.lock().unwrap();
+
+        let self_tag = seed_top_tag(&conn, "Self");
+        let near = vec_of(&[1.0, 0.0]);
+        let source = seed_atom_with_embedding(&conn, &near);
+        link(&conn, &source, &self_tag);
+
+        // No other neighbors at all.
+        let cfg = KnnTaggingConfig {
+            k: 10,
+            min_consensus: 1,
+            min_similarity: 0.0,
+        };
+        let applied = knn_inherit_tags(&conn, &source, cfg).unwrap();
+        assert!(
+            applied.is_empty(),
+            "source atom must not vote for its own tags"
+        );
+    }
+
+    #[test]
+    fn test_knn_tagging_config_from_settings_overrides() {
+        let mut s = HashMap::new();
+        s.insert("knn_tagging_k".to_string(), "5".to_string());
+        s.insert("knn_tagging_min_consensus".to_string(), "2".to_string());
+        s.insert("knn_tagging_min_similarity".to_string(), "0.7".to_string());
+        let cfg = KnnTaggingConfig::from_settings(&s);
+        assert_eq!(cfg.k, 5);
+        assert_eq!(cfg.min_consensus, 2);
+        assert!((cfg.min_similarity - 0.7).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_knn_tagging_config_from_settings_defaults_when_missing_or_invalid() {
+        let mut s = HashMap::new();
+        s.insert("knn_tagging_k".to_string(), "0".to_string()); // invalid (zero)
+        s.insert("knn_tagging_min_similarity".to_string(), "5".to_string()); // out of range
+        let cfg = KnnTaggingConfig::from_settings(&s);
+        let default = KnnTaggingConfig::default();
+        assert_eq!(cfg.k, default.k);
+        assert_eq!(cfg.min_consensus, default.min_consensus);
+        assert!((cfg.min_similarity - default.min_similarity).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_tagging_strategy_from_settings_default_is_knn_then_llm() {
+        let s = HashMap::new();
+        assert_eq!(
+            TaggingStrategy::from_settings(&s),
+            TaggingStrategy::KnnThenLlm
+        );
+    }
+
+    #[test]
+    fn test_tagging_strategy_from_settings_explicit_values() {
+        let cases = [
+            ("truncated_full_content", TaggingStrategy::TruncatedFullContent),
+            ("chunk_assisted", TaggingStrategy::ChunkAssisted),
+            ("knn_then_llm", TaggingStrategy::KnnThenLlm),
+            ("knn_only", TaggingStrategy::KnnOnly),
+        ];
+        for (raw, expected) in cases {
+            let mut s = HashMap::new();
+            s.insert("tagging_strategy".to_string(), raw.to_string());
+            assert_eq!(TaggingStrategy::from_settings(&s), expected, "for `{raw}`");
+        }
+    }
+
+    #[test]
+    fn test_tagging_strategy_uses_knn_uses_llm_predicates() {
+        assert!(!TaggingStrategy::TruncatedFullContent.uses_knn());
+        assert!(TaggingStrategy::TruncatedFullContent.uses_llm());
+
+        assert!(!TaggingStrategy::ChunkAssisted.uses_knn());
+        assert!(TaggingStrategy::ChunkAssisted.uses_llm());
+
+        assert!(TaggingStrategy::KnnThenLlm.uses_knn());
+        assert!(TaggingStrategy::KnnThenLlm.uses_llm());
+
+        assert!(TaggingStrategy::KnnOnly.uses_knn());
+        assert!(!TaggingStrategy::KnnOnly.uses_llm());
     }
 }

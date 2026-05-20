@@ -559,6 +559,27 @@ impl StorageBackend {
             StorageBackend::Postgres(_) => Ok(0),
         }
     }
+    pub(crate) async fn knn_inherit_tags_sync(
+        &self,
+        atom_id: &str,
+        config: crate::embedding::KnnTaggingConfig,
+    ) -> Result<Vec<String>, AtomicCoreError> {
+        match self {
+            StorageBackend::Sqlite(s) => {
+                let s = s.clone();
+                let atom_id = atom_id.to_string();
+                tokio::task::spawn_blocking(move || s.knn_inherit_tags_impl(&atom_id, config))
+                    .await
+                    .map_err(join_err)?
+            }
+            // Postgres: would need an equivalent pgvector neighbor query;
+            // not implemented yet. Returning Ok(empty) lets the LLM step run
+            // unmolested rather than failing the whole tagging job.
+            #[cfg(feature = "postgres")]
+            StorageBackend::Postgres(_) => Ok(Vec::new()),
+        }
+    }
+
 }
 
 // ==================== Async dispatch methods ====================
@@ -864,6 +885,8 @@ dispatch! {
         => sqlite: reset_failed_embedding_statuses_sync, pg_trait: ChunkStore, pg_method: reset_failed_embedding_statuses;
     fn reset_failed_tagging_statuses_sync(&self) -> Result<i32, AtomicCoreError>
         => sqlite: reset_failed_tagging_statuses_sync, pg_trait: ChunkStore, pg_method: reset_failed_tagging_statuses;
+    fn reset_completed_tagging_to_pending_sync(&self) -> Result<i32, AtomicCoreError>
+        => sqlite: reset_completed_tagging_to_pending_sync, pg_trait: ChunkStore, pg_method: reset_completed_tagging_to_pending;
     fn rebuild_semantic_edges_sync(&self) -> Result<i32, AtomicCoreError>
         => sqlite: rebuild_semantic_edges_sync, pg_trait: ChunkStore, pg_method: rebuild_semantic_edges;
     fn get_semantic_edges_sync(&self, min_similarity: f32) -> Result<Vec<SemanticEdge>, AtomicCoreError>

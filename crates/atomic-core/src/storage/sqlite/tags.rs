@@ -503,6 +503,20 @@ impl SqliteStorage {
             .map_err(|e| AtomicCoreError::Validation(e))
     }
 
+    pub(crate) fn knn_inherit_tags_impl(
+        &self,
+        atom_id: &str,
+        config: crate::embedding::KnnTaggingConfig,
+    ) -> StorageResult<Vec<String>> {
+        let conn = self
+            .db
+            .conn
+            .lock()
+            .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+        crate::embedding::knn_inherit_tags(&conn, atom_id, config)
+            .map_err(AtomicCoreError::Embedding)
+    }
+
     pub(crate) fn get_tag_tree_for_llm_impl(&self) -> StorageResult<String> {
         let conn = self.db.read_conn()?;
         crate::extraction::get_tag_tree_for_llm(&conn).map_err(|e| AtomicCoreError::Validation(e))

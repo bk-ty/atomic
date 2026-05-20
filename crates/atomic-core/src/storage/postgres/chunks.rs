@@ -326,6 +326,27 @@ impl ChunkStore for PostgresStorage {
         Ok(result.rows_affected() as i32)
     }
 
+    async fn reset_completed_tagging_to_pending(&self) -> StorageResult<i32> {
+        let result = sqlx::query(
+            "UPDATE atoms
+             SET tagging_status = 'pending', tagging_error = NULL
+             WHERE embedding_status = 'complete'
+               AND tagging_status <> 'processing'
+               AND db_id = $1",
+        )
+        .bind(&self.db_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            AtomicCoreError::DatabaseOperation(format!(
+                "Failed to reset completed tagging: {}",
+                e
+            ))
+        })?;
+
+        Ok(result.rows_affected() as i32)
+    }
+
     async fn rebuild_semantic_edges(&self) -> StorageResult<i32> {
         // Get all atoms with completed embeddings
         let atom_ids: Vec<(String,)> = sqlx::query_as(
