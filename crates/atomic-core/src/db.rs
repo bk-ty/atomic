@@ -211,7 +211,7 @@ impl Database {
     ///   1. Add a new `if version < N` block at the end (before the virtual-table section)
     ///   2. End the block with `PRAGMA user_version = N;`
     ///   3. Bump LATEST_VERSION
-    const LATEST_VERSION: i32 = 23;
+    const LATEST_VERSION: i32 = 24;
 
     pub fn run_migrations(conn: &Connection) -> Result<(), AtomicCoreError> {
         Self::run_migrations_internal(conn, false)
@@ -994,6 +994,28 @@ impl Database {
                  WHERE atom_id IS NOT NULL AND item_title IS NULL;
                  PRAGMA user_version = 23;"
             )?;
+        }
+
+        // --- V23 → V24: Backfill atom_tags.source for DBs that passed the
+        // pre-rebase fork V17 (health tables) and so skipped the upstream-
+        // origin V17 that adds atom_tags.source. The new V17 gate is a no-op
+        // for them because user_version is already ≥17. This block is the
+        // idempotent safety net so writes that reference atom_tags.source
+        // (e.g. health LLM-fix logging, manual tag attribution) succeed.
+        if version < 24 {
+            let has_col: bool = conn
+                .query_row(
+                    "SELECT 1 FROM pragma_table_info('atom_tags') WHERE name='source'",
+                    [],
+                    |_| Ok(true),
+                )
+                .unwrap_or(false);
+            if !has_col {
+                conn.execute_batch(
+                    "ALTER TABLE atom_tags ADD COLUMN source TEXT NOT NULL DEFAULT 'auto';",
+                )?;
+            }
+            conn.execute_batch("PRAGMA user_version = 24;")?;
         }
 
         // --- Triggers (recreated every startup to stay current) ---
