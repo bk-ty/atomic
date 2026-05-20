@@ -13,6 +13,37 @@ pub struct RebindVaultRequest {
     pub path: String,
 }
 
+#[derive(Deserialize, Serialize, ToSchema)]
+pub struct RegisterVaultRequest {
+    /// Vault display name (must be unique).
+    pub name: String,
+    /// Absolute filesystem path of the imported folder.
+    pub path: String,
+    /// Vault kind: "obsidian" or "markdown".
+    #[serde(default = "default_kind")]
+    pub kind: String,
+}
+
+fn default_kind() -> String {
+    "obsidian".to_string()
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct RegisterVaultResponse {
+    pub id: i64,
+}
+
+#[utoipa::path(post, path = "/api/vaults", request_body = RegisterVaultRequest, responses((status = 200, description = "Vault registered")), tag = "vaults")]
+pub async fn register_vault(
+    db: Db,
+    body: web::Json<RegisterVaultRequest>,
+) -> HttpResponse {
+    match db.0.register_vault(&body.name, &body.path, &body.kind).await {
+        Ok(id) => HttpResponse::Ok().json(RegisterVaultResponse { id }),
+        Err(e) => crate::error::error_response(e),
+    }
+}
+
 #[utoipa::path(get, path = "/api/vaults", responses((status = 200, description = "List imported vaults")), tag = "vaults")]
 pub async fn list_vaults(db: Db) -> HttpResponse {
     match db.0.list_vaults().await {

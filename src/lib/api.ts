@@ -487,6 +487,14 @@ export interface Vault {
   path_exists: boolean;
 }
 
+export async function registerVault(
+  name: string,
+  path: string,
+  kind: 'obsidian' | 'markdown' = 'obsidian',
+): Promise<{ id: number }> {
+  return getTransport().invoke('register_vault', { name, path, kind });
+}
+
 export async function listVaults(): Promise<Vault[]> {
   return getTransport().invoke('list_vaults', {});
 }

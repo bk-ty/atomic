@@ -3597,6 +3597,36 @@ impl AtomicCore {
             .map_err(|e| AtomicCoreError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
     }
 
+    /// Register a vault row from a non-Rust import path (currently the
+    /// TypeScript `importMarkdownFolder` flow). Idempotent: if a row with the
+    /// same `name` already exists its `path` is updated and `last_synced_at`
+    /// is touched. Returns the resulting vault id.
+    ///
+    /// Kept separate from `import_obsidian_vault` because the TS path runs
+    /// `bulk_create_atoms` on its own and never reaches that function — but
+    /// the user still expects the vault to show up in the registry so future
+    /// syncs can run through the (proper) Rust resync logic.
+    pub async fn register_vault(
+        &self,
+        name: &str,
+        path: &str,
+        kind: &str,
+    ) -> Result<i64, AtomicCoreError> {
+        let sqlite = self.storage.as_sqlite().ok_or_else(|| {
+            AtomicCoreError::Configuration(
+                "Vaults registry requires a sqlite-backed database".to_string(),
+            )
+        })?;
+        let s = sqlite.clone();
+        let name = name.to_string();
+        let path = path.to_string();
+        let kind = kind.to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        tokio::task::spawn_blocking(move || s.upsert_vault_sync(&name, &path, &kind, &now))
+            .await
+            .map_err(|e| AtomicCoreError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
+    }
+
     // ==================== Content Ingestion ====================
 
     /// Ingest a single URL: fetch, extract article, create atom, trigger embedding.

@@ -359,6 +359,7 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
 
 
     // Imported Vaults registry
+    cfg.route("/vaults", web::post().to(vaults::register_vault));
     cfg.route("/vaults", web::get().to(vaults::list_vaults));
     cfg.route("/vaults/{id}", web::put().to(vaults::rebind_vault));
     cfg.route("/vaults/{id}", web::delete().to(vaults::delete_vault));

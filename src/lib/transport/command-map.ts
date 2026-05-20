@@ -672,6 +672,16 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
   },
 
   // ==================== Imported Vaults ====================
+  register_vault: {
+    method: 'POST',
+    path: '/api/vaults',
+    argsMode: 'body',
+    transformArgs: (a) => ({
+      name: a.name,
+      path: a.path,
+      kind: a.kind ?? 'obsidian',
+    }),
+  },
   list_vaults: {
     method: 'GET',
     path: '/api/vaults',

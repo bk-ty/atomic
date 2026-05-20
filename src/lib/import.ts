@@ -193,9 +193,14 @@ function parseNote(
 
   if (finalContent.length < MIN_CONTENT_LENGTH) return null;
 
-  // Generate source URL matching the Rust format
+  // Generate source URL matching the Rust format. The Rust importer strips
+  // the trailing `.md` extension before encoding (see
+  // `crates/atomic-core/src/import/obsidian.rs::generate_source_url`); we
+  // MUST match it byte-for-byte or `sync_vault` won't find existing atoms
+  // imported via this path.
+  const pathNoExt = relativePath.replace(/\.md$/i, '');
   const encodedVault = encodeURIComponent(vaultName);
-  const encodedPath = relativePath
+  const encodedPath = pathNoExt
     .split('/')
     .map(encodeURIComponent)
     .join('/');
@@ -275,6 +280,21 @@ export async function importMarkdownFolder(
     }
   }
 
+
+  // Register the vault in the imported-vaults registry so the user can
+  // re-sync from Settings without re-picking the folder. We register
+  // *before* the bulk loop (rather than after success) so users who hit a
+  // "0 imported, N skipped" pass — the same path that surfaced this bug —
+  // still get a registry row they can manage.
+  try {
+    const { registerVault } = await import('./api');
+    await registerVault(vaultName, folderPath, 'obsidian');
+  } catch (e) {
+    // Non-fatal: the import itself should not fail because the registry
+    // upsert hit a transient error. Just log so we surface it during
+    // development.
+    console.warn('Import: failed to register vault in registry', e);
+  }
   // Send in batches via bulk create — server handles dedup
   for (let i = 0; i < prepared.length; i += BATCH_SIZE) {
     const batch = prepared.slice(i, i + BATCH_SIZE);

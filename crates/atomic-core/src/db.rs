@@ -211,7 +211,7 @@ impl Database {
     ///   1. Add a new `if version < N` block at the end (before the virtual-table section)
     ///   2. End the block with `PRAGMA user_version = N;`
     ///   3. Bump LATEST_VERSION
-    const LATEST_VERSION: i32 = 25;
+    const LATEST_VERSION: i32 = 26;
 
     pub fn run_migrations(conn: &Connection) -> Result<(), AtomicCoreError> {
         Self::run_migrations_internal(conn, false)
@@ -1034,6 +1034,21 @@ impl Database {
                 );
                  CREATE INDEX IF NOT EXISTS vaults_name_idx ON vaults(name);
                  PRAGMA user_version = 25;",
+            )?;
+        }
+
+        // --- V25 → V26: Unify obsidian:// source URLs. The TypeScript
+        // markdown-folder importer used to leave the `.md` extension on the
+        // path component; the Rust importer always strips it. Same files
+        // imported via the two paths therefore got two different source URLs
+        // and could not be deduplicated. Strip the trailing `.md` so the
+        // formats agree and `sync_vault` can find existing atoms.
+        if version < 26 {
+            conn.execute_batch(
+                "UPDATE atoms
+                    SET source_url = substr(source_url, 1, length(source_url) - 3)
+                  WHERE source_url LIKE 'obsidian://%.md';
+                 PRAGMA user_version = 26;",
             )?;
         }
 
