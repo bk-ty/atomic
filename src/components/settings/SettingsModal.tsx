@@ -77,6 +77,7 @@ import { formatRelativeDate } from '../../lib/date';
 import { useDatabasesStore, type DatabaseInfo, type DatabaseStats } from '../../stores/databases';
 import { OverrideControls } from './OverrideControls';
 import { TaggingStrategySection } from './TaggingStrategySection';
+import { ImportedVaults } from './ImportedVaults';
 import { HealthConfigTab } from '../health/HealthConfigTab';
 import { CustomChecksPanel } from '../health/CustomChecksPanel';
 
@@ -3228,6 +3229,20 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
               {/* ===== INTEGRATIONS TAB ===== */}
               {activeTab === 'integrations' && (
                 <>
+                  {/* Imported Vaults — one-click resync of previously imported folders */}
+                  <div className="space-y-3">
+                    <div className="space-y-1">
+                      <label className="block text-sm font-medium text-[var(--color-text-primary)]">
+                        Imported Vaults
+                      </label>
+                      <p className="text-xs text-[var(--color-text-secondary)]">
+                        Re-import a previously imported folder. Unchanged notes are skipped, edited
+                        notes are updated in place, new files are imported.
+                      </p>
+                    </div>
+                    <ImportedVaults />
+                  </div>
+
                   {/* Ingest URL Section */}
                   <div className="space-y-3">
                     <div className="space-y-1">

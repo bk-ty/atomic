@@ -13,6 +13,7 @@ mod feeds;
 mod search;
 mod settings;
 mod tags;
+mod vaults;
 mod wiki;
 pub(crate) mod health;
 

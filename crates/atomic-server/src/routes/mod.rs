@@ -20,6 +20,7 @@ pub mod search;
 pub mod settings;
 pub mod setup;
 pub mod utils;
+pub mod vaults;
 pub mod wiki;
 pub mod health;
 
@@ -356,6 +357,12 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
         web::post().to(import::import_obsidian_vault),
     );
 
+
+    // Imported Vaults registry
+    cfg.route("/vaults", web::get().to(vaults::list_vaults));
+    cfg.route("/vaults/{id}", web::put().to(vaults::rebind_vault));
+    cfg.route("/vaults/{id}", web::delete().to(vaults::delete_vault));
+    cfg.route("/vaults/{id}/sync", web::post().to(vaults::sync_vault));
     // Ingestion
     cfg.route("/ingest/url", web::post().to(ingest::ingest_url));
     cfg.route("/ingest/urls", web::post().to(ingest::ingest_urls));

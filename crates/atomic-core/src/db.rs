@@ -211,7 +211,7 @@ impl Database {
     ///   1. Add a new `if version < N` block at the end (before the virtual-table section)
     ///   2. End the block with `PRAGMA user_version = N;`
     ///   3. Bump LATEST_VERSION
-    const LATEST_VERSION: i32 = 24;
+    const LATEST_VERSION: i32 = 25;
 
     pub fn run_migrations(conn: &Connection) -> Result<(), AtomicCoreError> {
         Self::run_migrations_internal(conn, false)
@@ -1016,6 +1016,25 @@ impl Database {
                 )?;
             }
             conn.execute_batch("PRAGMA user_version = 24;")?;
+        }
+
+        // --- V24 → V25: Imported vaults registry. One row per imported
+        // folder source (Obsidian vault, generic markdown folder); enables
+        // the Settings "Imported Vaults" UI to one-click re-sync without
+        // making the user re-pick the folder every time.
+        if version < 25 {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS vaults (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    path TEXT NOT NULL,
+                    kind TEXT NOT NULL DEFAULT 'obsidian',
+                    last_synced_at TEXT,
+                    created_at TEXT NOT NULL
+                );
+                 CREATE INDEX IF NOT EXISTS vaults_name_idx ON vaults(name);
+                 PRAGMA user_version = 25;",
+            )?;
         }
 
         // --- Triggers (recreated every startup to stay current) ---

@@ -71,7 +71,7 @@ pub use db::Database;
 pub use embedding::{EmbeddingEvent, EmbeddingStrategy, TaggingStrategy};
 pub use error::AtomicCoreError;
 pub use export::{MarkdownArchiveFormat, MarkdownExportProgress, MarkdownExportResult};
-pub use import::{ImportProgress, ImportResult};
+pub use import::{ImportProgress, ImportResult, Vault};
 pub use ingest::{FeedPollResult, IngestionEvent, IngestionRequest, IngestionResult};
 pub use manager::DatabaseManager;
 pub use models::*;
@@ -3229,16 +3229,38 @@ impl AtomicCore {
             )));
         }
 
-        let vault_name = vault_path
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "Vault".to_string());
+        // If this exact path was previously registered (rebind case, or just a
+        // re-import after restart), reuse the stored vault name so the
+        // `obsidian://<name>/...` source URLs stay stable across folder
+        // renames. Otherwise fall back to the folder basename.
+        let now_for_vault = chrono::Utc::now().to_rfc3339();
+        let sqlite_for_vault = self.storage.as_sqlite().ok_or_else(|| {
+            AtomicCoreError::Configuration(
+                "Obsidian vault import requires a sqlite-backed database".to_string(),
+            )
+        })?;
+        let path_str = vault_path.to_string_lossy().to_string();
+        let existing = sqlite_for_vault.get_vault_by_path_sync(&path_str)?;
+        let vault_name = existing.as_ref().map(|v| v.name.clone()).unwrap_or_else(|| {
+            vault_path
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Vault".to_string())
+        });
+
+        let vault_id = sqlite_for_vault.upsert_vault_sync(
+            &vault_name,
+            &path_str,
+            "obsidian",
+            &now_for_vault,
+        )?;
 
         let exclude_patterns: Vec<&str> = import::obsidian::DEFAULT_EXCLUDES.to_vec();
         let mut note_files = import::obsidian::discover_notes(vault_path, &exclude_patterns)
             .map_err(|e| AtomicCoreError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
 
         if note_files.is_empty() {
+            sqlite_for_vault.touch_vault_synced_sync(vault_id, &now_for_vault)?;
             return Ok(ImportResult {
                 imported: 0,
                 updated: 0,
@@ -3478,7 +3500,101 @@ impl AtomicCore {
             self.process_queued_pipeline_jobs(on_event).await?;
         }
 
+        // Mark sync complete on the vault registry row. We touch even when
+        // the import was a pure no-op (everything skipped) so the UI can show
+        // an accurate "last checked" time.
+        let synced_at = chrono::Utc::now().to_rfc3339();
+        if let Some(sqlite) = self.storage.as_sqlite() {
+            sqlite.touch_vault_synced_sync(vault_id, &synced_at)?;
+        }
+
         Ok(stats)
+    }
+
+    /// List all imported vaults with derived `atom_count` and `path_exists`.
+    pub async fn list_vaults(&self) -> Result<Vec<import::Vault>, AtomicCoreError> {
+        let sqlite = self.storage.as_sqlite().ok_or_else(|| {
+            AtomicCoreError::Configuration(
+                "Vaults registry requires a sqlite-backed database".to_string(),
+            )
+        })?;
+        let s = sqlite.clone();
+        tokio::task::spawn_blocking(move || s.list_vaults_sync())
+            .await
+            .map_err(|e| AtomicCoreError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
+    }
+
+    /// One-click re-sync: re-runs import on the vault's stored path. Returns
+    /// the same `ImportResult` shape so the UI can show counts.
+    pub async fn sync_vault<F, P>(
+        &self,
+        id: i64,
+        on_event: F,
+        on_progress: P,
+    ) -> Result<import::ImportResult, AtomicCoreError>
+    where
+        F: Fn(EmbeddingEvent) + Send + Sync + Clone + 'static,
+        P: Fn(import::ImportProgress) + Send + Sync + Clone + 'static,
+    {
+        let sqlite = self.storage.as_sqlite().ok_or_else(|| {
+            AtomicCoreError::Configuration(
+                "Vaults registry requires a sqlite-backed database".to_string(),
+            )
+        })?;
+        let vault = {
+            let s = sqlite.clone();
+            tokio::task::spawn_blocking(move || s.get_vault_sync(id))
+                .await
+                .map_err(|e| {
+                    AtomicCoreError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
+                })??
+                .ok_or_else(|| {
+                    AtomicCoreError::NotFound(format!("Vault {} not found", id))
+                })?
+        };
+        if !vault.path_exists {
+            return Err(AtomicCoreError::Validation(format!(
+                "Vault path no longer exists: {}",
+                vault.path
+            )));
+        }
+        // Reuses the regular import path, which already upserts and touches
+        // last_synced_at. The vault row was created at first import, so the
+        // upsert is a no-op except for refreshing `path` if the user re-bound
+        // the folder before clicking Sync.
+        self.import_obsidian_vault(&vault.path, None, on_event, on_progress)
+            .await
+    }
+
+    /// Re-bind a vault to a different folder on disk. Used when the user
+    /// moved the folder and wants to point Atomic at the new location
+    /// without losing imported atoms.
+    pub async fn rebind_vault(&self, id: i64, path: &str) -> Result<(), AtomicCoreError> {
+        let sqlite = self.storage.as_sqlite().ok_or_else(|| {
+            AtomicCoreError::Configuration(
+                "Vaults registry requires a sqlite-backed database".to_string(),
+            )
+        })?;
+        let s = sqlite.clone();
+        let path = path.to_string();
+        tokio::task::spawn_blocking(move || s.update_vault_path_sync(id, &path))
+            .await
+            .map_err(|e| AtomicCoreError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
+    }
+
+    /// Remove a vault from the registry. Atoms are NOT deleted; the user can
+    /// continue to access them via search/canvas. Removing only stops the
+    /// vault from appearing in the sync UI.
+    pub async fn delete_vault(&self, id: i64) -> Result<(), AtomicCoreError> {
+        let sqlite = self.storage.as_sqlite().ok_or_else(|| {
+            AtomicCoreError::Configuration(
+                "Vaults registry requires a sqlite-backed database".to_string(),
+            )
+        })?;
+        let s = sqlite.clone();
+        tokio::task::spawn_blocking(move || s.delete_vault_sync(id))
+            .await
+            .map_err(|e| AtomicCoreError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?
     }
 
     // ==================== Content Ingestion ====================
@@ -4980,6 +5096,99 @@ mod tests {
             )
             .expect("count");
         assert_eq!(count, 1, "sync must not create duplicate atoms");
+    }
+
+    #[tokio::test]
+    async fn obsidian_import_registers_vault_and_sync_resyncs() {
+        let dir = TempDir::new().expect("create tempdir");
+        let vault = dir.path().join("MyVault");
+        std::fs::create_dir_all(&vault).expect("create vault folder");
+        std::fs::write(
+            vault.join("note.md"),
+            "# Note\n\nFirst pass content for vault registry test.",
+        )
+        .expect("write note");
+
+        let core =
+            AtomicCore::open_or_create(dir.path().join("atomic.db")).expect("open sqlite test db");
+        let vault_path = vault.to_string_lossy().to_string();
+
+        // First import: vault row should be created.
+        let r1 = core
+            .import_obsidian_vault(&vault_path, None, |_| {}, |_| {})
+            .await
+            .expect("first import");
+        assert_eq!(r1.imported, 1);
+
+        let vaults = core.list_vaults().await.expect("list vaults");
+        assert_eq!(vaults.len(), 1);
+        let v = &vaults[0];
+        assert_eq!(v.name, "MyVault");
+        assert_eq!(v.path, vault_path);
+        assert_eq!(v.kind, "obsidian");
+        assert_eq!(v.atom_count, 1);
+        assert!(v.path_exists);
+        assert!(v.last_synced_at.is_some(), "first import must touch synced timestamp");
+
+        // Modify on disk; sync_vault re-runs import on the stored path.
+        std::fs::write(
+            vault.join("note.md"),
+            "# Note\n\nSecond pass — vault sync should pick this up.",
+        )
+        .expect("rewrite note");
+        let r2 = core
+            .sync_vault(v.id, |_| {}, |_| {})
+            .await
+            .expect("sync_vault");
+        assert_eq!(r2.imported, 0);
+        assert_eq!(r2.updated, 1);
+        assert_eq!(r2.skipped, 0);
+
+        // Sync touched last_synced_at again (and only one vault row exists —
+        // upsert by name must not duplicate).
+        let after = core.list_vaults().await.expect("list after sync");
+        assert_eq!(after.len(), 1, "vault must remain unique by name");
+
+        // Stale-path detection: rename the folder, re-list, expect path_exists=false.
+        let renamed = dir.path().join("MyVault-moved");
+        std::fs::rename(&vault, &renamed).expect("rename folder");
+        let stale = core.list_vaults().await.expect("list with stale path");
+        assert!(!stale[0].path_exists, "moved folder must be detected as missing");
+
+        // Sync against a stale path must return a clear validation error
+        // rather than silently importing nothing or panicking.
+        let err = core.sync_vault(v.id, |_| {}, |_| {}).await.unwrap_err();
+        assert!(
+            format!("{}", err).contains("no longer exists"),
+            "stale-path sync must surface the missing folder, got: {err}"
+        );
+
+        // Re-bind to the new location and sync should succeed again.
+        core.rebind_vault(v.id, &renamed.to_string_lossy())
+            .await
+            .expect("rebind");
+        let r3 = core
+            .sync_vault(v.id, |_| {}, |_| {})
+            .await
+            .expect("sync after rebind");
+        assert_eq!(r3.imported, 0);
+        // Content matches what's already stored, so this is a pure no-op skip.
+        assert_eq!(r3.skipped, 1);
+
+        // Delete vault: registry row goes away, atom is preserved.
+        core.delete_vault(v.id).await.expect("delete vault");
+        let empty = core.list_vaults().await.expect("list after delete");
+        assert!(empty.is_empty());
+
+        let sqlite = core.storage.as_sqlite().expect("sqlite storage");
+        let conn = sqlite.db.conn.lock().expect("lock db");
+        let atom_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM atoms", [], |r| r.get(0))
+            .expect("count atoms");
+        assert_eq!(
+            atom_count, 1,
+            "delete_vault must preserve atoms; only the registry row goes away"
+        );
     }
 
     // ==================== Settings Resolver Tests ====================

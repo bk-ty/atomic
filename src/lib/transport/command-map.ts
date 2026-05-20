@@ -671,6 +671,26 @@ export const COMMAND_MAP: Record<string, CommandSpec> = {
     }),
   },
 
+  // ==================== Imported Vaults ====================
+  list_vaults: {
+    method: 'GET',
+    path: '/api/vaults',
+  },
+  sync_vault: {
+    method: 'POST',
+    path: (a) => `/api/vaults/${encodeURIComponent(String(a.id))}/sync`,
+  },
+  rebind_vault: {
+    method: 'PUT',
+    path: (a) => `/api/vaults/${encodeURIComponent(String(a.id))}`,
+    argsMode: 'body',
+    transformArgs: (a) => ({ path: a.path }),
+  },
+  delete_vault: {
+    method: 'DELETE',
+    path: (a) => `/api/vaults/${encodeURIComponent(String(a.id))}`,
+  },
+
   // ==================== Databases ====================
   list_databases: {
     method: 'GET',

@@ -475,6 +475,34 @@ export async function importObsidianVault(
   return getTransport().invoke('import_obsidian_vault', { vaultPath, maxNotes });
 }
 
+// Imported Vaults registry
+export interface Vault {
+  id: number;
+  name: string;
+  path: string;
+  kind: string;
+  last_synced_at: string | null;
+  created_at: string;
+  atom_count: number;
+  path_exists: boolean;
+}
+
+export async function listVaults(): Promise<Vault[]> {
+  return getTransport().invoke('list_vaults', {});
+}
+
+export async function syncVault(id: number): Promise<ImportResult> {
+  return getTransport().invoke('sync_vault', { id });
+}
+
+export async function rebindVault(id: number, path: string): Promise<void> {
+  return getTransport().invoke('rebind_vault', { id, path });
+}
+
+export async function deleteVault(id: number): Promise<void> {
+  return getTransport().invoke('delete_vault', { id });
+}
+
 // API Token types and commands
 export interface ApiTokenInfo {
   id: string;
