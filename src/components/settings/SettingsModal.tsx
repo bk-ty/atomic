@@ -2217,26 +2217,6 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                           />
                           <OverrideControls settingKey="wiki_model" />
                         </div>
-
-                        {/* Wiki Strategy */}
-                        <div className="space-y-1">
-                          <label className="block text-sm font-medium text-[var(--color-text-primary)]">
-                            Wiki Strategy
-                          </label>
-                          <p className="text-xs text-[var(--color-text-secondary)]">
-                            How source material is selected for wiki articles
-                          </p>
-                          <CustomSelect
-                            value={wikiStrategy}
-                            onChange={(v) => { setWikiStrategy(v); autoSave('wiki_strategy', v); }}
-                            options={[
-                              { value: 'centroid', label: 'Centroid — rank chunks by embedding similarity' },
-                              { value: 'agentic', label: 'Agentic — AI agent searches and curates sources' },
-                            ]}
-                          />
-                          <OverrideControls settingKey="wiki_strategy" />
-                        </div>
-
                         {/* Chat Model */}
                         <div className="space-y-1">
                           <label className="block text-sm font-medium text-[var(--color-text-primary)]">
@@ -2617,6 +2597,33 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                       </div>
                     </>
                   )}
+
+                  {/* Wiki Strategy — provider-agnostic. Lives outside the
+                      OpenRouter/Ollama conditionals because chunk-selection
+                      strategy is independent of which provider runs the LLM. */}
+                  <div className="space-y-4 pt-2">
+                    <div className="text-sm font-medium text-[var(--color-text-primary)]">Wiki Behavior</div>
+                    <div className="space-y-1">
+                      <label className="block text-sm font-medium text-[var(--color-text-primary)]">
+                        Wiki Strategy
+                      </label>
+                      <p className="text-xs text-[var(--color-text-secondary)]">
+                        How source material is selected for wiki articles. Agentic runs
+                        a research loop with tool calls (more costly, broader recall);
+                        Centroid ranks chunks by similarity to the tag centroid in a
+                        single shot (faster, deterministic).
+                      </p>
+                      <CustomSelect
+                        value={wikiStrategy}
+                        onChange={(v) => { setWikiStrategy(v); autoSave('wiki_strategy', v); }}
+                        options={[
+                          { value: 'centroid', label: 'Centroid — rank chunks by embedding similarity' },
+                          { value: 'agentic', label: 'Agentic — AI agent searches and curates sources' },
+                        ]}
+                      />
+                      <OverrideControls settingKey="wiki_strategy" />
+                    </div>
+                  </div>
                 </>
               )}
 
