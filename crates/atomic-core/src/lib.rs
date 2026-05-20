@@ -3331,7 +3331,14 @@ impl AtomicCore {
                 .get_atom_by_source_url_sync(&note.source_url)
                 .await?;
             let atom_id = if let Some(existing) = existing {
-                if existing.atom.content == note.content {
+                // Trim before comparing: the TypeScript importer keeps the
+                // body's trailing whitespace (`trimStart` only) while the
+                // Rust path uses a full `trim()`. We do not want to call 152
+                // atoms "updated" just because of a trailing newline that
+                // never reached the user. Comparing trimmed bodies also
+                // gives us future-proofing against either side adopting an
+                // editor that auto-trims.
+                if existing.atom.content.trim() == note.content.trim() {
                     stats.skipped += 1;
                     on_progress(ImportProgress {
                         current: index as i32 + 1,
@@ -5126,6 +5133,62 @@ mod tests {
             )
             .expect("count");
         assert_eq!(count, 1, "sync must not create duplicate atoms");
+    }
+
+    /// Regression: Sync was reporting every file as "updated" because the
+    /// TS importer's content kept a trailing newline (`trimStart` only)
+    /// while the Rust importer trimmed both sides — so `content_eq` failed
+    /// for atoms imported via the TS path. The Rust resync compare must be
+    /// `trim()`-tolerant for parity with the TS side. This test exercises
+    /// only the Rust path but locks in the trim-tolerant compare so a
+    /// future refactor can't silently re-introduce the bug.
+    #[tokio::test]
+    async fn obsidian_sync_treats_trailing_whitespace_as_unchanged() {
+        let dir = TempDir::new().expect("create tempdir");
+        let vault = dir.path().join("Vault");
+        std::fs::create_dir_all(&vault).expect("create vault folder");
+        let note_path = vault.join("note.md");
+        std::fs::write(&note_path, "# Note\n\nBody.").expect("write note");
+
+        let core =
+            AtomicCore::open_or_create(dir.path().join("atomic.db")).expect("open sqlite test db");
+        let vault_path = vault.to_string_lossy().to_string();
+
+        let r1 = core
+            .import_obsidian_vault(&vault_path, None, |_| {}, |_| {})
+            .await
+            .expect("first import");
+        assert_eq!(r1.imported, 1);
+
+        // Forge the on-disk database state to look like a TS-path import:
+        // body kept its trailing newline that the Rust path would have
+        // stripped. (This is exactly what 152 atoms in the user's DB look
+        // like.)
+        let source_url = "obsidian://Vault/note".to_string();
+        {
+            let sqlite = core.storage.as_sqlite().expect("sqlite storage");
+            let conn = sqlite.db.conn.lock().expect("lock db");
+            let updated = conn
+                .execute(
+                    "UPDATE atoms SET content = content || char(10) WHERE source_url = ?1",
+                    rusqlite::params![&source_url],
+                )
+                .expect("forge ts-style trailing newline");
+            assert_eq!(updated, 1);
+        }
+
+        // Re-import without changing the file on disk: must skip, not
+        // update. Pre-fix this returned `updated: 1`.
+        let r2 = core
+            .import_obsidian_vault(&vault_path, None, |_| {}, |_| {})
+            .await
+            .expect("re-import");
+        assert_eq!(r2.imported, 0);
+        assert_eq!(
+            r2.updated, 0,
+            "trailing-newline-only diff must not count as an update"
+        );
+        assert_eq!(r2.skipped, 1);
     }
 
     #[tokio::test]
