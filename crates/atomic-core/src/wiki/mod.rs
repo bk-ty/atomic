@@ -1228,6 +1228,91 @@ pub fn load_wiki_article(
     Ok(Some(WikiArticleWithCitations { article, citations }))
 }
 
+/// List citations for a tag's wiki with atom preview + live tag membership.
+///
+/// Returns the citation list ordered by citation_index, joined to `atoms` for
+/// title/source_url, and cross-checked against `atom_tags` / `tags` (recursive)
+/// to set `is_still_tagged`. Used by the reader's "linked atoms" drawer.
+pub fn list_citations_with_details(
+    conn: &Connection,
+    tag_id: &str,
+) -> Result<Vec<crate::models::WikiCitationDetail>, String> {
+    // Article id lookup; absent = empty list, not an error.
+    let article_id: Option<String> = conn
+        .query_row(
+            "SELECT id FROM wiki_articles WHERE tag_id = ?1",
+            [tag_id],
+            |r| r.get::<_, String>(0),
+        )
+        .ok();
+    let article_id = match article_id {
+        Some(id) => id,
+        None => return Ok(Vec::new()),
+    };
+
+    // Walk the descendant-tag set so a citation whose atom is tagged under
+    // a sub-tag still counts as "tagged". Matches the scope used by
+    // get_article_status / the stale-detection query.
+    let mut stmt = conn
+        .prepare(
+            "WITH RECURSIVE descendant_tags(id) AS (
+                 SELECT ?2
+                 UNION ALL
+                 SELECT t.id FROM tags t
+                 INNER JOIN descendant_tags dt ON t.parent_id = dt.id
+             )
+             SELECT
+                 c.id,
+                 c.citation_index,
+                 c.atom_id,
+                 c.chunk_index,
+                 c.excerpt,
+                 a.content,
+                 a.source_url,
+                 EXISTS(
+                     SELECT 1 FROM atom_tags at
+                     WHERE at.atom_id = c.atom_id
+                       AND at.tag_id IN (SELECT id FROM descendant_tags)
+                 ) AS is_still_tagged
+             FROM wiki_citations c
+             LEFT JOIN atoms a ON a.id = c.atom_id
+             WHERE c.wiki_article_id = ?1
+             ORDER BY c.citation_index",
+        )
+        .map_err(|e| format!("Failed to prepare detailed citations query: {}", e))?;
+
+    let rows = stmt
+        .query_map(rusqlite::params![&article_id, tag_id], |row| {
+            let content: Option<String> = row.get(5)?;
+            let atom_title = content
+                .as_deref()
+                .map(|c| {
+                    let trimmed = c.trim();
+                    if trimmed.chars().count() > 120 {
+                        let cutoff: String = trimmed.chars().take(120).collect();
+                        format!("{}\u{2026}", cutoff)
+                    } else {
+                        trimmed.to_string()
+                    }
+                })
+                .unwrap_or_default();
+            Ok(crate::models::WikiCitationDetail {
+                id: row.get(0)?,
+                citation_index: row.get(1)?,
+                atom_id: row.get(2)?,
+                chunk_index: row.get(3)?,
+                excerpt: row.get(4)?,
+                atom_title,
+                source_url: row.get(6)?,
+                is_still_tagged: row.get::<_, i64>(7)? != 0,
+            })
+        })
+        .map_err(|e| format!("Failed to query detailed citations: {}", e))?;
+
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to collect detailed citations: {}", e))
+}
+
 /// Get the status of a wiki article for a tag
 pub fn get_article_status(conn: &Connection, tag_id: &str) -> Result<WikiArticleStatus, String> {
     // Count distinct atoms across this tag and all descendants using recursive CTE
@@ -1258,11 +1343,13 @@ pub fn get_article_status(conn: &Connection, tag_id: &str) -> Result<WikiArticle
     match article_info {
         Some((article_atom_count, updated_at)) => {
             let new_atoms = (current_atom_count - article_atom_count).max(0);
+            let removed_atoms = (article_atom_count - current_atom_count).max(0);
             Ok(WikiArticleStatus {
                 has_article: true,
                 article_atom_count,
                 current_atom_count,
                 new_atoms_available: new_atoms,
+                removed_atoms_count: removed_atoms,
                 updated_at: Some(updated_at),
             })
         }
@@ -1271,6 +1358,7 @@ pub fn get_article_status(conn: &Connection, tag_id: &str) -> Result<WikiArticle
             article_atom_count: 0,
             current_atom_count,
             new_atoms_available: 0,
+            removed_atoms_count: 0,
             updated_at: None,
         }),
     }
@@ -1317,11 +1405,17 @@ pub fn load_all_wiki_articles(conn: &Connection) -> Result<Vec<WikiArticleSummar
                  w.updated_at,
                  w.atom_count,
                  (SELECT COUNT(*) FROM wiki_links wl WHERE wl.target_tag_id = w.tag_id) AS inbound_links,
-                 MAX(0, COALESCE(lc.cnt, 0) - w.atom_count) AS new_atoms_available
+                 MAX(0, COALESCE(lc.cnt, 0) - w.atom_count) AS new_atoms_available,
+                 MAX(0, w.atom_count - COALESCE(lc.cnt, 0)) AS removed_atoms_count
              FROM wiki_articles w
              JOIN tags t ON w.tag_id = t.id
              LEFT JOIN live_counts lc ON lc.tag_id = w.tag_id
-             ORDER BY inbound_links DESC, w.atom_count DESC, w.updated_at DESC",
+             ORDER BY
+                 inbound_links DESC,
+                 (MAX(0, COALESCE(lc.cnt, 0) - w.atom_count)
+                  + MAX(0, w.atom_count - COALESCE(lc.cnt, 0))) DESC,
+                 w.atom_count DESC,
+                 w.updated_at DESC",
         )
         .map_err(|e| format!("Failed to prepare wiki articles query: {}", e))?;
 
@@ -1335,6 +1429,7 @@ pub fn load_all_wiki_articles(conn: &Connection) -> Result<Vec<WikiArticleSummar
                 atom_count: row.get(4)?,
                 inbound_links: row.get(5)?,
                 new_atoms_available: row.get(6)?,
+                removed_atoms_count: row.get(7)?,
             })
         })
         .map_err(|e| format!("Failed to query wiki articles: {}", e))?

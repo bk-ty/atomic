@@ -323,6 +323,27 @@ pub struct WikiArticleWithCitations {
     pub citations: Vec<WikiCitation>,
 }
 
+/// Citation enriched with atom metadata for the "linked atoms" drawer in the
+/// wiki reader. Includes whether the cited atom is still tagged under the
+/// article's tag subtree, so the UI can flag stale citations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct WikiCitationDetail {
+    pub id: String,
+    pub citation_index: i32,
+    pub atom_id: String,
+    pub chunk_index: Option<i32>,
+    pub excerpt: String,
+    /// First ~120 chars of the atom content, for display.
+    pub atom_title: String,
+    pub source_url: Option<String>,
+    /// `true` iff the cited atom is still tagged under the wiki's tag (or any
+    /// descendant tag). `false` means the atom has been untagged since the
+    /// article was generated — untagging it again is a no-op, but the
+    /// regenerate flow should drop the citation.
+    pub is_still_tagged: bool,
+}
+
 /// A pending proposal to update a wiki article.
 ///
 /// Proposals are transient: at most one exists per `tag_id` at a time.
@@ -359,6 +380,11 @@ pub struct WikiArticleStatus {
     pub article_atom_count: i32,
     pub current_atom_count: i32,
     pub new_atoms_available: i32,
+    /// Atoms that were tagged when the article was last generated but have
+    /// since been untagged (or their tags moved). Non-zero means the article
+    /// may cite atoms no longer in scope and should be regenerated.
+    #[serde(default)]
+    pub removed_atoms_count: i32,
     pub updated_at: Option<String>,
 }
 
@@ -373,9 +399,16 @@ pub struct WikiArticleSummary {
     pub atom_count: i32,
     pub inbound_links: i32,
     /// Live count of atoms tagged under this tag hierarchy that have been added
-    /// since the article was last generated. Computed server-side via the same
-    /// recursive CTE used by `GET /api/wiki/{tag_id}/status`; never stale.
+    /// since the article was last generated. Clamped at zero; a non-zero value
+    /// here means new atoms are available. If the live count dropped below the
+    /// snapshot (e.g., atoms were untagged), this is zero and the drift shows
+    /// up in `removed_atoms_count` instead.
     pub new_atoms_available: i32,
+    /// Atoms that disappeared from this tag's subtree since the article was
+    /// generated (untag, retag, delete). Surfaces shrinkage staleness that
+    /// `new_atoms_available` alone cannot detect.
+    #[serde(default)]
+    pub removed_atoms_count: i32,
 }
 
 /// Inter-article wiki link (cross-reference between wiki articles)

@@ -342,6 +342,41 @@ pub async fn update_atom(
     }
 }
 
+/// Remove one tag from an atom. Thin wrapper over `update_atom` that avoids
+/// the client having to fetch the current tag set first.
+#[utoipa::path(
+    delete,
+    path = "/api/atoms/{id}/tags/{tag_id}",
+    params(
+        ("id" = String, Path, description = "Atom ID"),
+        ("tag_id" = String, Path, description = "Tag ID to remove"),
+    ),
+    responses(
+        (status = 200, description = "Atom with the tag removed", body = AtomWithTags),
+        (status = 404, description = "Atom not found", body = ApiErrorResponse),
+    ),
+    tag = "atoms",
+)]
+pub async fn untag_atom(
+    state: web::Data<AppState>,
+    db: Db,
+    path: web::Path<(String, String)>,
+) -> HttpResponse {
+    let (atom_id, tag_id) = path.into_inner();
+    let on_event = embedding_event_callback(state.event_tx.clone());
+    let event_tx = state.event_tx.clone();
+    match db.0.untag_atom(&atom_id, &tag_id, on_event).await {
+        Ok(Some(atom)) => {
+            let _ = event_tx.send(ServerEvent::AtomUpdated { atom: atom.clone() });
+            HttpResponse::Ok().json(atom)
+        }
+        Ok(None) => HttpResponse::NotFound().json(crate::error::ApiErrorResponse {
+            error: "Atom not found".to_string(),
+        }),
+        Err(e) => crate::error::error_response(e),
+    }
+}
+
 /// Update atom content/metadata without triggering embedding or tagging pipeline.
 /// Used by auto-save during inline editing.
 #[utoipa::path(

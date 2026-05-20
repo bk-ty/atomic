@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
-import { Clock, RefreshCw } from 'lucide-react';
+import { Clock, RefreshCw, Link2 } from 'lucide-react';
 import { useWikiStore } from '../../stores/wiki';
 import { useUIStore } from '../../stores/ui';
 import { WikiArticleContent } from './WikiArticleContent';
 import { WikiEmptyState } from './WikiEmptyState';
 import { WikiGenerating } from './WikiGenerating';
 import { WikiProposalDiff } from './WikiProposalDiff';
+import { WikiCitationsDrawer } from './WikiCitationsDrawer';
 import { Button } from '../ui/Button';
 import { Modal } from '../ui/Modal';
 import { formatRelativeTime } from '../../lib/date';
@@ -158,7 +159,7 @@ export function WikiReader({ tagId, tagName, highlightText }: WikiReaderProps) {
     : currentArticle.citations;
 
   return (
-    <div className="h-full flex flex-col overflow-hidden bg-[var(--color-bg-main)]">
+    <div className="h-full flex flex-col overflow-hidden bg-[var(--color-bg-main)] relative">
       {/* Version viewing banner */}
       {selectedVersion && (
         <div className="flex items-center justify-between px-6 py-2 bg-amber-500/10 border-b border-amber-500/20 flex-shrink-0">
@@ -182,17 +183,32 @@ export function WikiReader({ tagId, tagName, highlightText }: WikiReaderProps) {
         </div>
       )}
 
-      {/* New atoms available banner */}
-      {!proposal && !selectedVersion && (articleStatus?.new_atoms_available || 0) > 0 && (
-        <div className="flex items-center justify-between px-6 py-2 bg-[var(--color-accent)]/10 border-b border-[var(--color-accent)]/20 flex-shrink-0">
-          <span className="text-sm text-[var(--color-accent-light)]">
-            {articleStatus!.new_atoms_available} new atom{articleStatus!.new_atoms_available !== 1 ? 's' : ''} available
-          </span>
-          <Button variant="primary" size="sm" onClick={handleUpdate} disabled={isProposing || isUpdating}>
-            {isProposing ? 'Generating...' : 'Generate update'}
-          </Button>
-        </div>
-      )}
+      {/* New / removed atoms banner */}
+      {!proposal && !selectedVersion &&
+        ((articleStatus?.new_atoms_available || 0) > 0 ||
+          (articleStatus?.removed_atoms_count || 0) > 0) && (
+          <div className="flex items-center justify-between px-6 py-2 bg-[var(--color-accent)]/10 border-b border-[var(--color-accent)]/20 flex-shrink-0">
+            <span className="text-sm text-[var(--color-accent-light)]">
+              {(articleStatus?.new_atoms_available || 0) > 0 && (
+                <>
+                  {articleStatus!.new_atoms_available} new atom
+                  {articleStatus!.new_atoms_available !== 1 ? 's' : ''} available
+                </>
+              )}
+              {(articleStatus?.new_atoms_available || 0) > 0 &&
+                (articleStatus?.removed_atoms_count || 0) > 0 && <> · </>}
+              {(articleStatus?.removed_atoms_count || 0) > 0 && (
+                <>
+                  {articleStatus!.removed_atoms_count} atom
+                  {articleStatus!.removed_atoms_count !== 1 ? 's' : ''} untagged
+                </>
+              )}
+            </span>
+            <Button variant="primary" size="sm" onClick={handleUpdate} disabled={isProposing || isUpdating}>
+              {isProposing ? 'Generating...' : 'Generate update'}
+            </Button>
+          </div>
+        )}
 
       {/* Proposal diff view */}
       {reviewingProposal && proposal && !selectedVersion ? (
@@ -253,6 +269,16 @@ export function WikiReader({ tagId, tagName, highlightText }: WikiReaderProps) {
                     )}
                   </div>
                 )}
+                {/* Linked atoms drawer */}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => useWikiStore.getState().openCitationsDrawer()}
+                  disabled={!!selectedVersion}
+                  title="Linked atoms"
+                >
+                  <Link2 className="w-4 h-4" strokeWidth={2} />
+                </Button>
                 {/* Regenerate */}
                 <Button
                   variant="ghost"
@@ -288,6 +314,9 @@ export function WikiReader({ tagId, tagName, highlightText }: WikiReaderProps) {
           Are you sure you want to continue?
         </p>
       </Modal>
+
+      {/* Linked-atoms drawer (right side, overlays the article) */}
+      <WikiCitationsDrawer tagId={tagId} tagName={tagName} />
     </div>
   );
 }

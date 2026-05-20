@@ -35,6 +35,7 @@ pub use utoipa_scalar::{Scalar, Servable};
         routes::atoms::get_atom_by_source_url,
         routes::atoms::create_atom,
         routes::atoms::update_atom,
+        routes::atoms::untag_atom,
         routes::atoms::update_atom_content_only,
         routes::atoms::process_atom_pipeline,
         routes::atoms::delete_atom,
@@ -57,6 +58,7 @@ pub use utoipa_scalar::{Scalar, Servable};
         routes::wiki::get_all_wiki_articles,
         routes::wiki::get_wiki,
         routes::wiki::get_wiki_status,
+        routes::wiki::list_wiki_citation_details,
         routes::wiki::generate_wiki,
         routes::wiki::update_wiki,
         routes::wiki::delete_wiki,
@@ -204,6 +206,7 @@ pub use utoipa_scalar::{Scalar, Servable};
         // Wiki
         atomic_core::WikiArticle,
         atomic_core::WikiCitation,
+        atomic_core::WikiCitationDetail,
         atomic_core::WikiArticleWithCitations,
         atomic_core::WikiArticleStatus,
         atomic_core::WikiArticleSummary,

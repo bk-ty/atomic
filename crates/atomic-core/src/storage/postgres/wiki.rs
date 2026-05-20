@@ -65,6 +65,100 @@ impl WikiStore for PostgresStorage {
         Ok(Some(WikiArticleWithCitations { article, citations }))
     }
 
+    async fn list_wiki_citation_details(
+        &self,
+        tag_id: &str,
+    ) -> StorageResult<Vec<WikiCitationDetail>> {
+        // article_id lookup scoped by db_id; absent → empty list.
+        let article_id: Option<String> = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM wiki_articles WHERE tag_id = $1 AND db_id = $2",
+        )
+        .bind(tag_id)
+        .bind(&self.db_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+
+        let Some(article_id) = article_id else {
+            return Ok(Vec::new());
+        };
+
+        // Recursive CTE expands the wiki's tag to include all descendants so
+        // a citation whose atom was tagged under a sub-tag still counts.
+        let rows = sqlx::query_as::<_, (
+            String,
+            i32,
+            String,
+            Option<i32>,
+            String,
+            Option<String>,
+            Option<String>,
+            bool,
+        )>(
+            "WITH RECURSIVE descendant_tags(id) AS (
+                 SELECT $1::text
+                 UNION ALL
+                 SELECT t.id FROM tags t
+                 INNER JOIN descendant_tags dt ON t.parent_id = dt.id
+                 WHERE t.db_id = $3
+             )
+             SELECT
+                 c.id,
+                 c.citation_index,
+                 c.atom_id,
+                 c.chunk_index,
+                 c.excerpt,
+                 a.content,
+                 a.source_url,
+                 EXISTS(
+                     SELECT 1 FROM atom_tags at
+                     WHERE at.atom_id = c.atom_id
+                       AND at.tag_id IN (SELECT id FROM descendant_tags)
+                       AND at.db_id = $3
+                 ) AS is_still_tagged
+             FROM wiki_citations c
+             LEFT JOIN atoms a ON a.id = c.atom_id AND a.db_id = c.db_id
+             WHERE c.wiki_article_id = $2 AND c.db_id = $3
+             ORDER BY c.citation_index",
+        )
+        .bind(tag_id)
+        .bind(&article_id)
+        .bind(&self.db_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(id, citation_index, atom_id, chunk_index, excerpt, content, source_url, is_still_tagged)| {
+                    let atom_title = content
+                        .as_deref()
+                        .map(|c| {
+                            let trimmed = c.trim();
+                            if trimmed.chars().count() > 120 {
+                                let cutoff: String = trimmed.chars().take(120).collect();
+                                format!("{}\u{2026}", cutoff)
+                            } else {
+                                trimmed.to_string()
+                            }
+                        })
+                        .unwrap_or_default();
+                    WikiCitationDetail {
+                        id,
+                        citation_index,
+                        atom_id,
+                        chunk_index,
+                        excerpt,
+                        atom_title,
+                        source_url,
+                        is_still_tagged,
+                    }
+                },
+            )
+            .collect())
+    }
+
     async fn get_wiki_status(&self, tag_id: &str) -> StorageResult<WikiArticleStatus> {
         // Count distinct atoms across this tag and all descendants using recursive CTE
         let current_atom_count: Option<i64> = sqlx::query_scalar::<_, Option<i64>>(
@@ -98,11 +192,13 @@ impl WikiStore for PostgresStorage {
         match article_info {
             Some((article_atom_count, updated_at)) => {
                 let new_atoms = (current_atom_count as i32 - article_atom_count).max(0);
+                let removed_atoms = (article_atom_count - current_atom_count as i32).max(0);
                 Ok(WikiArticleStatus {
                     has_article: true,
                     article_atom_count,
                     current_atom_count: current_atom_count as i32,
                     new_atoms_available: new_atoms,
+                    removed_atoms_count: removed_atoms,
                     updated_at: Some(updated_at),
                 })
             }
@@ -111,6 +207,7 @@ impl WikiStore for PostgresStorage {
                 article_atom_count: 0,
                 current_atom_count: current_atom_count as i32,
                 new_atoms_available: 0,
+                removed_atoms_count: 0,
                 updated_at: None,
             }),
         }
@@ -376,7 +473,7 @@ impl WikiStore for PostgresStorage {
     async fn get_all_wiki_articles(&self) -> StorageResult<Vec<WikiArticleSummary>> {
         // Use a recursive CTE to compute the live atom count per tag hierarchy so that
         // new_atoms_available is always consistent with GET /api/wiki/{tag_id}/status.
-        let rows = sqlx::query_as::<_, (String, String, String, String, i32, i64, i32)>(
+        let rows = sqlx::query_as::<_, (String, String, String, String, i32, i64, i32, i32)>(
             "WITH RECURSIVE
                  -- Expand each wiki-article tag to include all its descendant tags.
                  -- Seeded only from tags that have a wiki article so the recursion is
@@ -405,14 +502,17 @@ impl WikiStore for PostgresStorage {
                  t.name,
                  w.updated_at,
                  w.atom_count,
-                 (SELECT COUNT(*) FROM wiki_links wl WHERE wl.target_tag_id = w.tag_id AND wl.db_id = $1),
-                 GREATEST(0, COALESCE(lc.cnt, 0) - w.atom_count)
-             FROM wiki_articles w
-             JOIN tags t ON w.tag_id = t.id AND t.db_id = $1
-             LEFT JOIN live_counts lc ON lc.tag_id = w.tag_id
-             WHERE w.db_id = $1
-             ORDER BY (SELECT COUNT(*) FROM wiki_links wl WHERE wl.target_tag_id = w.tag_id AND wl.db_id = $1) DESC,
-                      w.atom_count DESC, w.updated_at DESC",
+                (SELECT COUNT(*) FROM wiki_links wl WHERE wl.target_tag_id = w.tag_id AND wl.db_id = $1),
+                GREATEST(0, COALESCE(lc.cnt, 0) - w.atom_count),
+                GREATEST(0, w.atom_count - COALESCE(lc.cnt, 0))
+            FROM wiki_articles w
+            JOIN tags t ON w.tag_id = t.id AND t.db_id = $1
+            LEFT JOIN live_counts lc ON lc.tag_id = w.tag_id
+            WHERE w.db_id = $1
+            ORDER BY (SELECT COUNT(*) FROM wiki_links wl WHERE wl.target_tag_id = w.tag_id AND wl.db_id = $1) DESC,
+                     (GREATEST(0, COALESCE(lc.cnt, 0) - w.atom_count)
+                      + GREATEST(0, w.atom_count - COALESCE(lc.cnt, 0))) DESC,
+                     w.atom_count DESC, w.updated_at DESC",
         )
         .bind(&self.db_id)
         .fetch_all(&self.pool)
@@ -422,7 +522,7 @@ impl WikiStore for PostgresStorage {
         Ok(rows
             .into_iter()
             .map(
-                |(id, tag_id, tag_name, updated_at, atom_count, inbound_links, new_atoms_available)| {
+                |(id, tag_id, tag_name, updated_at, atom_count, inbound_links, new_atoms_available, removed_atoms_count)| {
                     WikiArticleSummary {
                         id,
                         tag_id,
@@ -431,6 +531,7 @@ impl WikiStore for PostgresStorage {
                         atom_count,
                         inbound_links: inbound_links as i32,
                         new_atoms_available,
+                        removed_atoms_count,
                     }
                 },
             )

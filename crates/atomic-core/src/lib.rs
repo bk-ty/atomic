@@ -91,6 +91,11 @@ pub enum WikiProposeOutcome {
     /// New atoms exist but have no embeddable chunks yet (embedding still in
     /// progress). Baseline was NOT advanced — retry once embedding completes.
     NotReady,
+    /// Atoms were removed from the tag (untagged/deleted) but nothing new was
+    /// added. The shared section-ops update path cannot handle removals; UI
+    /// should route the user to full regenerate. Baseline is NOT advanced so
+    /// the "N atoms untagged" banner keeps showing until regenerate runs.
+    ShrinkageOnly { removed_count: i32 },
 }
 
 use chrono::Utc;
@@ -1134,6 +1139,48 @@ impl AtomicCore {
         Ok(atom_with_tags)
     }
 
+    /// Remove a single tag from an atom without replacing the full tag set.
+    ///
+    /// Fetches the atom's current tags, drops the target, and delegates to
+    /// [`update_atom`] so the standard pipeline (re-embedding, re-tagging,
+    /// wiki staleness propagation) still fires. Returns `Ok(None)` if the
+    /// atom does not exist or is not tagged with `tag_id`.
+    pub async fn untag_atom<F>(
+        &self,
+        atom_id: &str,
+        tag_id: &str,
+        on_event: F,
+    ) -> Result<Option<AtomWithTags>, AtomicCoreError>
+    where
+        F: Fn(EmbeddingEvent) + Send + Sync + 'static,
+    {
+        let atom = match self.get_atom(atom_id).await? {
+            Some(a) => a,
+            None => return Ok(None),
+        };
+
+        let had_tag = atom.tags.iter().any(|t| t.id == tag_id);
+        if !had_tag {
+            return Ok(Some(atom));
+        }
+
+        let new_tag_ids: Vec<String> = atom
+            .tags
+            .iter()
+            .filter(|t| t.id != tag_id)
+            .map(|t| t.id.clone())
+            .collect();
+
+        let request = UpdateAtomRequest {
+            content: atom.atom.content.clone(),
+            source_url: atom.atom.source_url.clone(),
+            published_at: atom.atom.published_at.clone(),
+            tag_ids: Some(new_tag_ids),
+        };
+        let updated = self.update_atom(atom_id, request, on_event).await?;
+        Ok(Some(updated))
+    }
+
     /// Update an existing atom's content/metadata without triggering re-embedding or tagging.
     /// Used by auto-save during inline editing to persist content frequently without
     /// flooding the embedding pipeline. The full `update_atom` should be called when
@@ -1655,6 +1702,23 @@ impl AtomicCore {
                 return Ok(WikiProposeOutcome::NotReady);
             }
             wiki::WikiStrategyOutcome::NoNewAtoms | wiki::WikiStrategyOutcome::LlmNoChange => {
+                // Before declaring victory, check whether the article is actually
+                // in sync or whether atoms were REMOVED since the last generation.
+                // `strategy_propose` only looks at newly-added atoms, so untag/
+                // delete-only events land here with `NoNewAtoms`.
+                let status = self.get_wiki_status(tag_id).await?;
+                if status.removed_atoms_count > 0 {
+                    tracing::info!(
+                        tag_id,
+                        removed = status.removed_atoms_count,
+                        "[wiki] Atoms removed since last generation; propose path cannot handle shrinkage — routing to regenerate"
+                    );
+                    // Do NOT advance baseline — keep the drift visible until the
+                    // user triggers a regenerate.
+                    return Ok(WikiProposeOutcome::ShrinkageOnly {
+                        removed_count: status.removed_atoms_count,
+                    });
+                }
                 if let Err(e) = self.storage.advance_wiki_baseline_sync(tag_id, None).await {
                     tracing::warn!(tag_id, error = %e, "[wiki] Failed to advance article baseline on no-change");
                 } else {
@@ -1798,6 +1862,15 @@ impl AtomicCore {
         tag_id: &str,
     ) -> Result<WikiArticleStatus, AtomicCoreError> {
         self.storage.get_wiki_status_sync(tag_id).await
+    }
+
+    /// List citations for a tag's wiki enriched with atom title + current
+    /// membership state. Backs the "linked atoms" drawer in the wiki reader.
+    pub async fn list_wiki_citation_details(
+        &self,
+        tag_id: &str,
+    ) -> Result<Vec<WikiCitationDetail>, AtomicCoreError> {
+        self.storage.list_wiki_citation_details_sync(tag_id).await
     }
 
     /// Delete a wiki article (and any pending proposal for it — once the

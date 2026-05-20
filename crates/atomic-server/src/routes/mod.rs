@@ -43,6 +43,10 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.route("/atoms/{id}", web::get().to(atoms::get_atom));
     cfg.route("/atoms/{id}", web::put().to(atoms::update_atom));
     cfg.route(
+        "/atoms/{id}/tags/{tag_id}",
+        web::delete().to(atoms::untag_atom),
+    );
+    cfg.route(
         "/atoms/{id}/content",
         web::put().to(atoms::update_atom_content_only),
     );
@@ -98,6 +102,10 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.route(
         "/wiki/{tag_id}/status",
         web::get().to(wiki::get_wiki_status),
+    );
+    cfg.route(
+        "/wiki/{tag_id}/citations/detailed",
+        web::get().to(wiki::list_wiki_citation_details),
     );
     cfg.route(
         "/wiki/{tag_id}/generate",

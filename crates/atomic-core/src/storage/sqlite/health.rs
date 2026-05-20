@@ -224,19 +224,24 @@ impl SqliteStorage {
 
         // ---- wiki coverage ----
         // Tags with >= thresholds.wiki_min_atoms_per_tag atoms
+        // Include every tag that has either (a) live atom count >= threshold
+        // OR (b) a wiki article. The second case catches wikis whose underlying
+        // atoms were untagged/removed; without it, a tag whose live count drops
+        // below threshold would vanish from the join and appear "fresh" forever.
         let mut stmt = conn.prepare(
             "SELECT t.id, t.name,
-                    COUNT(DISTINCT at.atom_id) as atom_count,
+                    COUNT(DISTINCT at.atom_id) as live_atom_count,
                     w.id IS NOT NULL as has_wiki,
                     w.updated_at,
+                    w.atom_count as wiki_snapshot_count,
                     (SELECT MAX(a.updated_at) FROM atoms a
                      JOIN atom_tags at2 ON a.id = at2.atom_id
                      WHERE at2.tag_id = t.id) as last_atom_update
              FROM tags t
-             JOIN atom_tags at ON t.id = at.tag_id
+             LEFT JOIN atom_tags at ON t.id = at.tag_id
              LEFT JOIN wiki_articles w ON t.id = w.tag_id
              GROUP BY t.id
-             HAVING COUNT(DISTINCT at.atom_id) >= ?1
+             HAVING COUNT(DISTINCT at.atom_id) >= ?1 OR w.id IS NOT NULL
              ORDER BY COUNT(DISTINCT at.atom_id) DESC
              LIMIT 50",
         )?;
@@ -247,18 +252,32 @@ impl SqliteStorage {
             let atom_count: i32 = row.get(2)?;
             let has_wiki: bool = row.get(3)?;
             let wiki_updated_at: Option<String> = row.get(4)?;
-            let last_atom_update: Option<String> = row.get(5)?;
-
-            raw.wiki_eligible_count += 1;
-
+            let wiki_snapshot_count: Option<i32> = row.get(5)?;
+            let last_atom_update: Option<String> = row.get(6)?;
+            // Tags only qualify as "eligible" if they meet the atom threshold.
+            // Below-threshold wikis are still evaluated for staleness (drift).
+            let eligible = atom_count >= thresholds.wiki_min_atoms_per_tag;
+            if eligible {
+                raw.wiki_eligible_count += 1;
+            }
             if has_wiki {
                 raw.wiki_present_count += 1;
-                // Stale if any atom updated after the wiki
-                let is_stale = match (&wiki_updated_at, &last_atom_update) {
+                // Stale if:
+                //   (a) any atom in the tag has a newer updated_at than the wiki
+                //       (classic "content changed" drift), OR
+                //   (b) the live atom count for this tag differs from the snapshot
+                //       recorded at generation time (membership drift — covers
+                //       untag, retag, and delete paths that don't bump any
+                //       individual atom visible to the join above).
+                let content_drift = match (&wiki_updated_at, &last_atom_update) {
                     (Some(w), Some(a)) => a > w,
                     _ => false,
                 };
-                if is_stale {
+                let membership_drift = match wiki_snapshot_count {
+                    Some(snap) => snap != atom_count,
+                    None => false,
+                };
+                if content_drift || membership_drift {
                     raw.wiki_stale_count += 1;
                     raw.wiki_stale.push(WikiStaleEntry {
                         tag_id,

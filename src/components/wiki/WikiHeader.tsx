@@ -7,6 +7,7 @@ import type { WikiVersionSummary } from '../../stores/wiki';
 
 interface WikiHeaderProps {
   newAtomsAvailable: number;
+  removedAtomsCount?: number;
   onUpdate: () => void;
   onRegenerate: () => void;
   onClose: () => void;
@@ -25,6 +26,7 @@ interface WikiHeaderProps {
 
 export function WikiHeader({
   newAtomsAvailable,
+  removedAtomsCount = 0,
   onUpdate,
   onRegenerate,
   onClose,
@@ -172,11 +174,17 @@ export function WikiHeader({
         </div>
       )}
 
-      {/* New atoms banner — only when no proposal is pending */}
-      {!hasProposal && newAtomsAvailable > 0 && !isViewingVersion && (
+      {/* New / removed atoms banner — only when no proposal is pending */}
+      {!hasProposal && !isViewingVersion && (newAtomsAvailable > 0 || removedAtomsCount > 0) && (
         <div className="flex items-center justify-between px-6 py-2 bg-[var(--color-accent)]/10 border-t border-[var(--color-accent)]/20">
           <span className="text-sm text-[var(--color-accent-light)]">
-            {newAtomsAvailable} new atom{newAtomsAvailable !== 1 ? 's' : ''} available
+            {newAtomsAvailable > 0 && (
+              <>{newAtomsAvailable} new atom{newAtomsAvailable !== 1 ? 's' : ''} available</>
+            )}
+            {newAtomsAvailable > 0 && removedAtomsCount > 0 && <> · </>}
+            {removedAtomsCount > 0 && (
+              <>{removedAtomsCount} atom{removedAtomsCount !== 1 ? 's' : ''} untagged</>
+            )}
           </span>
           <Button
             variant="primary"
