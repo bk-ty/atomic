@@ -20,6 +20,14 @@ impl SqliteStorage {
         wiki::get_article_status(&conn, tag_id).map_err(|e| AtomicCoreError::Wiki(e))
     }
 
+    pub(crate) fn list_wiki_citation_details_sync(
+        &self,
+        tag_id: &str,
+    ) -> StorageResult<Vec<WikiCitationDetail>> {
+        let conn = self.db.read_conn()?;
+        wiki::list_citations_with_details(&conn, tag_id).map_err(AtomicCoreError::Wiki)
+    }
+
     pub(crate) fn save_wiki_sync(
         &self,
         tag_id: &str,
@@ -529,6 +537,17 @@ impl WikiStore for SqliteStorage {
         let storage = self.clone();
         let tag_id = tag_id.to_string();
         tokio::task::spawn_blocking(move || storage.get_wiki_status_sync(&tag_id))
+            .await
+            .map_err(|e| AtomicCoreError::Lock(e.to_string()))?
+    }
+
+    async fn list_wiki_citation_details(
+        &self,
+        tag_id: &str,
+    ) -> StorageResult<Vec<WikiCitationDetail>> {
+        let storage = self.clone();
+        let tag_id = tag_id.to_string();
+        tokio::task::spawn_blocking(move || storage.list_wiki_citation_details_sync(&tag_id))
             .await
             .map_err(|e| AtomicCoreError::Lock(e.to_string()))?
     }

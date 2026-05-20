@@ -103,15 +103,6 @@ pub async fn reembed_all_atoms(state: web::Data<AppState>, db: Db) -> HttpRespon
     }
 }
 
-#[utoipa::path(post, path = "/api/tagging/retag-all", responses((status = 200, description = "Number of atoms queued for re-tagging")), tag = "embeddings")]
-pub async fn retag_all_atoms(state: web::Data<AppState>, db: Db) -> HttpResponse {
-    let on_event = embedding_event_callback(state.event_tx.clone());
-    match db.0.retag_all_atoms(on_event).await {
-        Ok(count) => HttpResponse::Ok().json(serde_json::json!({"count": count})),
-        Err(e) => crate::error::error_response(e),
-    }
-}
-
 #[utoipa::path(post, path = "/api/embeddings/reset-stuck", responses((status = 200, description = "Number of stuck atoms reset")), tag = "embeddings")]
 pub async fn reset_stuck_processing(db: Db) -> HttpResponse {
     match db.0.reset_stuck_processing().await {

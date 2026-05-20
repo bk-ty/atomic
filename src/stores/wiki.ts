@@ -20,6 +20,17 @@ export interface WikiCitation {
   excerpt: string;
 }
 
+export interface WikiCitationDetail {
+  id: string;
+  citation_index: number;
+  atom_id: string;
+  chunk_index: number | null;
+  excerpt: string;
+  atom_title: string;
+  source_url: string | null;
+  is_still_tagged: boolean;
+}
+
 export interface WikiArticleWithCitations {
   article: WikiArticle;
   citations: WikiCitation[];
@@ -30,6 +41,7 @@ export interface WikiArticleStatus {
   article_atom_count: number;
   current_atom_count: number;
   new_atoms_available: number;
+  removed_atoms_count?: number;
   updated_at: string | null;
 }
 
@@ -42,6 +54,8 @@ export interface WikiArticleSummary {
   inbound_links: number;
   /** Live count of atoms added since last generation. Computed server-side via recursive CTE. */
   new_atoms_available: number;
+  /** Atoms that disappeared from this tag's subtree since last generation (untag/delete). */
+  removed_atoms_count?: number;
 }
 
 export interface WikiLink {
@@ -126,6 +140,11 @@ interface WikiStore {
   relatedTags: RelatedTag[];
   wikiLinks: WikiLink[];
 
+  // Linked-atoms drawer
+  citationDetails: WikiCitationDetail[];
+  isLoadingCitationDetails: boolean;
+  showCitationsDrawer: boolean;
+
   // Version history
   versions: WikiVersionSummary[];
   selectedVersion: WikiArticleVersion | null;
@@ -173,6 +192,12 @@ interface WikiStore {
   dismissProposal: (tagId: string) => Promise<void>;
   startReviewingProposal: () => void;
   stopReviewingProposal: () => void;
+
+  // Linked-atoms drawer actions
+  fetchCitationDetails: (tagId: string) => Promise<void>;
+  openCitationsDrawer: () => void;
+  closeCitationsDrawer: () => void;
+  untagAtomFromWiki: (tagId: string, atomId: string) => Promise<void>;
 }
 
 export const useWikiStore = create<WikiStore>((set, get) => ({
@@ -194,6 +219,9 @@ export const useWikiStore = create<WikiStore>((set, get) => ({
   articleStatus: null,
   relatedTags: [],
   wikiLinks: [],
+  citationDetails: [],
+  isLoadingCitationDetails: false,
+  showCitationsDrawer: false,
   versions: [],
   selectedVersion: null,
   proposal: null,
@@ -450,6 +478,20 @@ export const useWikiStore = create<WikiStore>((set, get) => ({
           description: 'New atoms are still being embedded. Try again once embedding completes.',
         });
         // Do NOT refresh status — the banner should stay showing the pending atoms.
+      } else if ('status' in result && result.status === 'shrinkage_only') {
+        set({ isProposing: false, proposal: null });
+        const removed = (result as { removed_count?: number }).removed_count ?? 0;
+        toast.info(`${removed} atom${removed === 1 ? '' : 's'} untagged`, {
+          id: 'wiki-propose-shrinkage',
+          description: 'Section-ops updates can\'t remove citations — regenerate the article to drop them.',
+          action: {
+            label: 'Regenerate',
+            onClick: () => get().generateArticle(tagId, tagName),
+          },
+          duration: 10000,
+        });
+        // Do NOT refresh status — keep the banner visible so the user can see
+        // the drift count until regenerate runs.
       } else {
         set({ proposal: result as WikiProposal, isProposing: false });
         toast.success('Suggested update ready', {
@@ -567,6 +609,62 @@ export const useWikiStore = create<WikiStore>((set, get) => ({
       reviewingProposal: false,
       error: null,
     });
+  },
+
+  // ==================== Linked-atoms drawer ====================
+
+  fetchCitationDetails: async (tagId: string) => {
+    set({ isLoadingCitationDetails: true });
+    try {
+      const details = await getTransport().invoke<WikiCitationDetail[]>(
+        'get_wiki_citation_details',
+        { tagId }
+      );
+      set({ citationDetails: details, isLoadingCitationDetails: false });
+    } catch (error) {
+      console.error('Failed to fetch citation details:', error);
+      set({ isLoadingCitationDetails: false });
+    }
+  },
+
+  openCitationsDrawer: () => {
+    const tagId = get().currentTagId;
+    set({ showCitationsDrawer: true });
+    if (tagId) get().fetchCitationDetails(tagId);
+  },
+
+  closeCitationsDrawer: () => {
+    set({ showCitationsDrawer: false });
+  },
+
+  untagAtomFromWiki: async (tagId: string, atomId: string) => {
+    // Optimistic removal from the drawer list — we filter by current membership
+    // in the UI, so after untag the row should vanish even before refresh.
+    const previous = get().citationDetails;
+    set({
+      citationDetails: previous.map((c) =>
+        c.atom_id === atomId ? { ...c, is_still_tagged: false } : c
+      ),
+    });
+    try {
+      await getTransport().invoke('untag_atom', { atomId, tagId });
+      toast.success('Atom untagged', {
+        id: `untag-${atomId}`,
+        description: 'Wiki will show as needing regeneration.',
+      });
+      // Refresh status so the "N atoms untagged" banner updates.
+      get().fetchArticleStatus(tagId);
+      // Also re-fetch details so any follow-on state (eg. other tags the atom
+      // still carries) is accurate.
+      get().fetchCitationDetails(tagId);
+    } catch (error) {
+      // Roll back optimistic update on failure.
+      set({ citationDetails: previous });
+      toast.error('Failed to untag atom', {
+        id: `untag-${atomId}-error`,
+        description: String(error),
+      });
+    }
   },
 
   clearError: () => {

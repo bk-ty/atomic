@@ -660,6 +660,14 @@ pub trait WikiStore: Send + Sync {
 
     /// Get wiki article status (exists, atom count, etc.).
     async fn get_wiki_status(&self, tag_id: &str) -> StorageResult<WikiArticleStatus>;
+
+    /// List wiki citations with atom title + live tag membership, for the
+    /// "linked atoms" drawer in the wiki reader.
+    async fn list_wiki_citation_details(
+        &self,
+        tag_id: &str,
+    ) -> StorageResult<Vec<WikiCitationDetail>>;
+
     /// Save or update a wiki article with citations.
     async fn save_wiki(
         &self,

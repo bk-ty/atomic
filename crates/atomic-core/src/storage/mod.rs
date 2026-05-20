@@ -979,6 +979,8 @@ dispatch! {
         => sqlite: get_wiki_sync, pg_trait: WikiStore, pg_method: get_wiki;
     fn get_wiki_status_sync(&self, tag_id: &str) -> Result<WikiArticleStatus, AtomicCoreError>
         => sqlite: get_wiki_status_sync, pg_trait: WikiStore, pg_method: get_wiki_status;
+    fn list_wiki_citation_details_sync(&self, tag_id: &str) -> Result<Vec<WikiCitationDetail>, AtomicCoreError>
+        => sqlite: list_wiki_citation_details_sync, pg_trait: WikiStore, pg_method: list_wiki_citation_details;
     fn save_wiki_with_links_sync(&self, article: &WikiArticle, citations: &[WikiCitation], links: &[WikiLink]) -> Result<(), AtomicCoreError>
         => sqlite: save_wiki_with_links_sync, pg_trait: WikiStore, pg_method: save_wiki_with_links;
     fn delete_wiki_sync(&self, tag_id: &str) -> Result<(), AtomicCoreError>

@@ -23,6 +23,18 @@ pub async fn get_wiki_status(db: Db, path: web::Path<String>) -> HttpResponse {
     ok_or_error(db.0.get_wiki_status(&tag_id).await)
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/wiki/{tag_id}/citations/detailed",
+    params(("tag_id" = String, Path, description = "Tag ID")),
+    responses((status = 200, description = "Citations with atom previews and live tag membership", body = Vec<atomic_core::WikiCitationDetail>)),
+    tag = "wiki"
+)]
+pub async fn list_wiki_citation_details(db: Db, path: web::Path<String>) -> HttpResponse {
+    let tag_id = path.into_inner();
+    ok_or_error(db.0.list_wiki_citation_details(&tag_id).await)
+}
+
 #[derive(Deserialize, Serialize, ToSchema)]
 pub struct GenerateWikiBody {
     /// Tag name for the wiki article
@@ -146,6 +158,12 @@ pub async fn propose_wiki(
         }
         Ok(atomic_core::WikiProposeOutcome::NotReady) => {
             HttpResponse::Ok().json(serde_json::json!({ "status": "not_ready" }))
+        }
+        Ok(atomic_core::WikiProposeOutcome::ShrinkageOnly { removed_count }) => {
+            HttpResponse::Ok().json(serde_json::json!({
+                "status": "shrinkage_only",
+                "removed_count": removed_count,
+            }))
         }
         Err(e) => crate::error::error_response(e),
     }
