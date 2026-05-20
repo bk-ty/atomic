@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportResult {
     pub imported: i32,
+    pub updated: i32,
     pub skipped: i32,
     pub errors: i32,
     pub tags_created: i32,

@@ -465,7 +465,9 @@ function DataLoadingContent({
           </Button>
           {importResult && (
             <p className="text-xs text-green-500 mt-1">
-              Imported {importResult.imported} notes ({importResult.skipped} skipped)
+              Imported {importResult.imported} notes
+              {importResult.updated > 0 ? `, updated ${importResult.updated}` : ''}
+              {' '}({importResult.skipped} skipped)
             </p>
           )}
           {importError && <p className="text-xs text-red-500 mt-1">{importError}</p>}

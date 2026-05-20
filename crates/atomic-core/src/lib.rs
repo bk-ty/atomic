@@ -3241,6 +3241,7 @@ impl AtomicCore {
         if note_files.is_empty() {
             return Ok(ImportResult {
                 imported: 0,
+                updated: 0,
                 skipped: 0,
                 errors: 0,
                 tags_created: 0,
@@ -3255,6 +3256,7 @@ impl AtomicCore {
         let total = note_files.len() as i32;
         let mut stats = ImportResult {
             imported: 0,
+            updated: 0,
             skipped: 0,
             errors: 0,
             tags_created: 0,
@@ -3298,55 +3300,109 @@ impl AtomicCore {
                 continue;
             }
 
-            // Check for duplicate by source_url
-            if self
+            // Sync: if an atom for this source_url already exists, update its
+            // content when the markdown on disk has changed; otherwise skip.
+            // Tag relinking still runs below so that folder reorganizations
+            // and frontmatter edits propagate via INSERT OR IGNORE.
+            let existing = self
                 .storage
-                .source_url_exists_sync(&note.source_url)
-                .await?
-            {
-                stats.skipped += 1;
-                on_progress(ImportProgress {
-                    current: index as i32 + 1,
-                    total,
-                    current_file: relative_str,
-                    status: "skipped".to_string(),
-                });
-                continue;
-            }
-
-            let atom_id = Uuid::new_v4().to_string();
-
-            // Use insert_atom_impl for the atom insert
-            match self
-                .storage
-                .insert_atom_impl(
-                    &atom_id,
-                    &CreateAtomRequest {
-                        content: note.content.clone(),
-                        source_url: Some(note.source_url.clone()),
-                        published_at: None,
-                        tag_ids: vec![],
-                        ..Default::default()
-                    },
-                    &note.created_at,
-                )
-                .await
-            {
-                Ok(_) => {
-                    imported_atoms.push((atom_id.clone(), note.content.clone()));
-                }
-                Err(e) => {
-                    tracing::error!(file = %relative_str, error = %e, "Error inserting atom");
-                    stats.errors += 1;
+                .get_atom_by_source_url_sync(&note.source_url)
+                .await?;
+            let atom_id = if let Some(existing) = existing {
+                if existing.atom.content == note.content {
+                    stats.skipped += 1;
                     on_progress(ImportProgress {
                         current: index as i32 + 1,
                         total,
-                        current_file: relative_str,
-                        status: "error".to_string(),
+                        current_file: relative_str.clone(),
+                        status: "skipped".to_string(),
                     });
-                    continue;
+                    // Fall through to tag relinking — frontmatter or folder
+                    // tags may have changed even when the body did not.
+                    existing.atom.id
+                } else {
+                    match self
+                        .storage
+                        .update_atom_impl(
+                            &existing.atom.id,
+                            &UpdateAtomRequest {
+                                content: note.content.clone(),
+                                source_url: Some(note.source_url.clone()),
+                                published_at: None,
+                                // None preserves existing tag links; we
+                                // additively reattach folder/frontmatter tags
+                                // below via INSERT OR IGNORE.
+                                tag_ids: None,
+                            },
+                            &note.updated_at,
+                        )
+                        .await
+                    {
+                        Ok(_) => {
+                            imported_atoms.push((existing.atom.id.clone(), note.content.clone()));
+                            stats.updated += 1;
+                            on_progress(ImportProgress {
+                                current: index as i32 + 1,
+                                total,
+                                current_file: relative_str.clone(),
+                                status: "updated".to_string(),
+                            });
+                            existing.atom.id
+                        }
+                        Err(e) => {
+                            tracing::error!(file = %relative_str, error = %e, "Error updating atom");
+                            stats.errors += 1;
+                            on_progress(ImportProgress {
+                                current: index as i32 + 1,
+                                total,
+                                current_file: relative_str,
+                                status: "error".to_string(),
+                            });
+                            continue;
+                        }
+                    }
                 }
-            }
+            } else {
+                let new_id = Uuid::new_v4().to_string();
+                match self
+                    .storage
+                    .insert_atom_impl(
+                        &new_id,
+                        &CreateAtomRequest {
+                            content: note.content.clone(),
+                            source_url: Some(note.source_url.clone()),
+                            published_at: None,
+                            tag_ids: vec![],
+                            ..Default::default()
+                        },
+                        &note.created_at,
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        imported_atoms.push((new_id.clone(), note.content.clone()));
+                        stats.imported += 1;
+                        on_progress(ImportProgress {
+                            current: index as i32 + 1,
+                            total,
+                            current_file: relative_str.clone(),
+                            status: "importing".to_string(),
+                        });
+                        new_id
+                    }
+                    Err(e) => {
+                        tracing::error!(file = %relative_str, error = %e, "Error inserting atom");
+                        stats.errors += 1;
+                        on_progress(ImportProgress {
+                            current: index as i32 + 1,
+                            total,
+                            current_file: relative_str,
+                            status: "error".to_string(),
+                        });
+                        continue;
+                    }
+                }
+            };
 
             // Process hierarchical folder tags using the raw conn helper
             // (get_or_create_tag uses parent_id, which the trait method doesn't support directly)
@@ -3401,13 +3457,7 @@ impl AtomicCore {
             }
             drop(conn);
 
-            stats.imported += 1;
-            on_progress(ImportProgress {
-                current: index as i32 + 1,
-                total,
-                current_file: relative_str,
-                status: "importing".to_string(),
-            });
+
         }
 
         // Trigger embedding processing for all imported atoms
@@ -4862,6 +4912,74 @@ mod tests {
                 ("Projects".to_string(), "manual".to_string()),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn obsidian_import_resyncs_modified_notes() {
+        let dir = TempDir::new().expect("create tempdir");
+        let vault = dir.path().join("Vault");
+        let project_dir = vault.join("Projects");
+        std::fs::create_dir_all(&project_dir).expect("create vault folder");
+        let note_path = project_dir.join("note.md");
+        std::fs::write(&note_path, "# Imported note\n\nFirst pass content for sync test.")
+            .expect("write note");
+
+        let core =
+            AtomicCore::open_or_create(dir.path().join("atomic.db")).expect("open sqlite test db");
+        let vault_path = vault.to_string_lossy().to_string();
+
+        // First import: net-new atom.
+        let r1 = core
+            .import_obsidian_vault(&vault_path, None, |_| {}, |_| {})
+            .await
+            .expect("first import");
+        assert_eq!(r1.imported, 1);
+        assert_eq!(r1.updated, 0);
+        assert_eq!(r1.skipped, 0);
+
+        // Second import, content unchanged: skipped, no update, no insert.
+        let r2 = core
+            .import_obsidian_vault(&vault_path, None, |_| {}, |_| {})
+            .await
+            .expect("second import (unchanged)");
+        assert_eq!(r2.imported, 0);
+        assert_eq!(r2.updated, 0);
+        assert_eq!(r2.skipped, 1);
+
+        // Mutate the file on disk and re-import: update should fire, atom id stable.
+        std::fs::write(
+            &note_path,
+            "# Imported note\n\nSecond pass content — should resync.",
+        )
+        .expect("rewrite note");
+        let r3 = core
+            .import_obsidian_vault(&vault_path, None, |_| {}, |_| {})
+            .await
+            .expect("third import (modified)");
+        assert_eq!(r3.imported, 0);
+        assert_eq!(r3.updated, 1);
+        assert_eq!(r3.skipped, 0);
+
+        // Verify the stored content matches the new disk content and no
+        // duplicate atom was created for the same source_url.
+        let source_url = "obsidian://Vault/Projects/note".to_string();
+        let atom = core
+            .get_atom_by_source_url(&source_url)
+            .await
+            .expect("lookup")
+            .expect("atom present");
+        assert!(atom.atom.content.contains("Second pass content"));
+
+        let sqlite = core.storage.as_sqlite().expect("sqlite storage");
+        let conn = sqlite.db.conn.lock().expect("lock db");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM atoms WHERE source_url = ?1",
+                rusqlite::params![&source_url],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(count, 1, "sync must not create duplicate atoms");
     }
 
     // ==================== Settings Resolver Tests ====================

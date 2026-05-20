@@ -301,6 +301,7 @@ export async function importAppleNotesWithDeps(
 
   return {
     imported,
+    updated: 0,
     skipped,
     errors,
     tags_created: tagCache.size,

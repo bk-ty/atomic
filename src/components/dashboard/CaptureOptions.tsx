@@ -258,7 +258,7 @@ function MarkdownBody() {
   const [importTags, setImportTags] = useState(true);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<{ processed: number; total: number } | null>(null);
-  const [result, setResult] = useState<{ imported: number; skipped: number } | null>(null);
+  const [result, setResult] = useState<{ imported: number; updated: number; skipped: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const fetchAtoms = useAtomsStore(s => s.fetchAtoms);
   const fetchTags = useTagsStore(s => s.fetchTags);
@@ -275,8 +275,8 @@ function MarkdownBody() {
         importTags,
         onProgress: p => setProgress({ processed: p.current, total: p.total }),
       });
-      setResult({ imported: res.imported, skipped: res.skipped });
-      if (res.imported > 0) await Promise.all([fetchAtoms(), fetchTags()]);
+      setResult({ imported: res.imported, updated: res.updated, skipped: res.skipped });
+      if (res.imported > 0 || res.updated > 0) await Promise.all([fetchAtoms(), fetchTags()])
     } catch (e) {
       setError(String(e));
     }
@@ -308,6 +308,7 @@ function MarkdownBody() {
       {result && (
         <div className="text-[12px] text-emerald-400">
           Imported {result.imported} atom{result.imported === 1 ? '' : 's'}
+          {result.updated ? ` · updated ${result.updated}` : ''}
           {result.skipped ? ` · skipped ${result.skipped}` : ''}.
         </div>
       )}
@@ -322,7 +323,7 @@ function AppleNotesBody() {
   const [importTags, setImportTags] = useState(true);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<{ processed: number; total: number } | null>(null);
-  const [result, setResult] = useState<{ imported: number; skipped: number } | null>(null);
+  const [result, setResult] = useState<{ imported: number; updated: number; skipped: number } | null>(null);
   const [error, setError] = useState<{ kind: AppleNotesImportError['kind'] | 'other'; message: string } | null>(null);
   const fetchAtoms = useAtomsStore(s => s.fetchAtoms);
   const fetchTags = useTagsStore(s => s.fetchTags);
@@ -337,8 +338,8 @@ function AppleNotesBody() {
         importTags,
         onProgress: p => setProgress({ processed: p.current, total: p.total }),
       });
-      setResult({ imported: res.imported, skipped: res.skipped });
-      if (res.imported > 0) await Promise.all([fetchAtoms(), fetchTags()]);
+      setResult({ imported: res.imported, updated: res.updated, skipped: res.skipped });
+      if (res.imported > 0 || res.updated > 0) await Promise.all([fetchAtoms(), fetchTags()])
     } catch (e) {
       if (e instanceof AppleNotesImportError) {
         setError({ kind: e.kind, message: e.message });

@@ -305,6 +305,7 @@ export async function importMarkdownFolder(
 
   return {
     imported,
+    updated: 0,
     skipped,
     errors,
     tags_created: tagCache.size,

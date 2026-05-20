@@ -1795,7 +1795,7 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
       setImportResult(result);
 
       // Refresh atoms and tags to show imported content
-      if (result.imported > 0) {
+      if (result.imported > 0 || result.updated > 0) {
         await Promise.all([fetchAtoms(), fetchTags()]);
       }
     } catch (e) {
@@ -1821,7 +1821,7 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
       });
       setImportResult(result);
 
-      if (result.imported > 0) {
+      if (result.imported > 0 || result.updated > 0) {
         await Promise.all([fetchAtoms(), fetchTags()]);
       }
     } catch (e) {
@@ -3417,6 +3417,9 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                           <div className="text-green-400 font-medium mb-1">Import complete!</div>
                           <div className="text-[var(--color-text-secondary)] space-y-0.5">
                             <div>Imported: {importResult.imported} notes</div>
+                            {importResult.updated > 0 && (
+                              <div>Updated: {importResult.updated} (content changed)</div>
+                            )}
                             {importResult.tags_created > 0 && (
                               <div>Tags created: {importResult.tags_created}</div>
                             )}
@@ -3424,7 +3427,7 @@ export function SettingsModal({ isOpen, onClose, initialTab }: SettingsModalProp
                               <div>Errors: {importResult.errors} (failed to create)</div>
                             )}
                             {importResult.skipped > 0 && (
-                              <div>Skipped: {importResult.skipped} (duplicates/empty)</div>
+                              <div>Skipped: {importResult.skipped} (unchanged)</div>
                             )}
                           </div>
                         </div>

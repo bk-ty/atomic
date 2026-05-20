@@ -461,6 +461,7 @@ export async function verifyProviderConfigured(): Promise<boolean> {
 // Import types and commands
 export interface ImportResult {
   imported: number;
+  updated: number;
   skipped: number;
   errors: number;
   tags_created: number;

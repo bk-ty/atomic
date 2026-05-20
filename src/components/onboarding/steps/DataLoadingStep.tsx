@@ -150,7 +150,9 @@ export function DataLoadingStep({ state, dispatch }: DataLoadingStepProps) {
           </Button>
           {importResult && (
             <p className="text-sm text-green-500">
-              Imported {importResult.imported} notes ({importResult.skipped} skipped)
+              Imported {importResult.imported} notes
+              {importResult.updated > 0 ? `, updated ${importResult.updated}` : ''}
+              {' '}({importResult.skipped} skipped)
             </p>
           )}
           {importError && <p className="text-sm text-red-500">{importError}</p>}
