@@ -1245,6 +1245,61 @@ mod llm_tests {
         assert_eq!(proposal.actions.len(), 0);
     }
 
+    /// Regression test for the bug where `propose_tag_restructure` only sent the
+    /// top-level category roots to the LLM. With a 4-root tree like
+    /// `Topics / People / Locations / Organizations`, the model would
+    /// confidently report "no duplicates, no orphans" — because at the *root*
+    /// level there never are any. The proposal builder must flatten the full
+    /// tree (depth-first) so children are visible.
+    #[tokio::test]
+    async fn test_propose_tag_restructure_includes_descendant_tags() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(chat_completion_body(
+                    r#"{"summary":"ok","actions":[]}"#,
+                )),
+            )
+            .mount(&server)
+            .await;
+
+        let (core, _dir) = open_core_with_llm(&server.uri()).await;
+
+        // Build a tree: Topics → "Programming" → "Rust" (a leaf).
+        let topics = core.create_tag("Topics", None).await.unwrap();
+        let programming = core
+            .create_tag("Programming", Some(&topics.id))
+            .await
+            .unwrap();
+        let rust = core
+            .create_tag("Dev Team Meeting", Some(&programming.id))
+            .await
+            .unwrap();
+
+        llm_fixes::propose_tag_restructure(&core)
+            .await
+            .expect("propose_tag_restructure");
+
+        // Capture the request the LLM saw and assert all three tag names are in
+        // the prompt — including the deeply-nested leaf, which is the whole point.
+        let received = server.received_requests().await.expect("recorded requests");
+        assert_eq!(received.len(), 1, "exactly one LLM call expected");
+        let body = String::from_utf8(received[0].body.clone()).expect("utf8 body");
+        assert!(body.contains("Topics"), "root tag missing from prompt");
+        assert!(
+            body.contains("Programming"),
+            "intermediate tag missing from prompt — proposal builder is not flattening children",
+        );
+        assert!(
+            body.contains("Dev Team Meeting"),
+            "leaf tag missing from prompt — proposal builder is not flattening children",
+        );
+        // Sanity-check that the IDs are also present so the LLM can reference them
+        // in `merge`/`rename`/`reparent`/`delete` actions.
+        assert!(body.contains(&rust.id), "leaf tag id missing from prompt");
+    }
+
     #[tokio::test]
     async fn test_set_atom_locked_persists_and_roundtrips() {
         let server = MockServer::start().await;
