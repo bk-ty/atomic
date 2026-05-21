@@ -74,27 +74,31 @@ export const TagNode = memo(function TagNode({ tag, level, selectedTagId, onSele
         <span className="w-4" />
       )}
       <span className="flex-1 truncate text-sm">{tag.name}</span>
-      {!hasChildren && (
-        <>
-          {/* Chat icon - visible on hover */}
-          <button
-            onClick={handleChatClick}
-            className="w-5 h-5 flex items-center justify-center opacity-0 group-hover:opacity-100 text-[var(--color-text-secondary)] hover:text-[var(--color-accent-light)] transition-all"
-            title="Chat with this tag"
-          >
-            <MessageCircle className="w-3.5 h-3.5" strokeWidth={2} />
-          </button>
-          {/* Article icon - visible on hover */}
-          <button
-            onClick={handleWikiClick}
-            className="w-5 h-5 flex items-center justify-center opacity-0 group-hover:opacity-100 text-[var(--color-text-secondary)] hover:text-[var(--color-accent-light)] transition-all"
-            title="View wiki article"
-          >
-            <FileText className="w-3.5 h-3.5" strokeWidth={2} />
-          </button>
-        </>
+      {/* Chat icon — visible on hover. For parent tags, scopes the
+          conversation to the entire subtree (the backend walks descendants
+          via recursive CTE in `get_tag_hierarchy`). */}
+      <button
+        onClick={handleChatClick}
+        className="w-5 h-5 flex items-center justify-center opacity-0 group-hover:opacity-100 text-[var(--color-text-secondary)] hover:text-[var(--color-accent-light)] transition-all"
+        title={hasChildren ? 'Chat with this tag and its sub-tags' : 'Chat with this tag'}
+      >
+        <MessageCircle className="w-3.5 h-3.5" strokeWidth={2} />
+      </button>
+      {/* Wiki icon — visible on hover. Opening the reader for a parent tag
+          will synthesize an article over the entire subtree. */}
+      <button
+        onClick={handleWikiClick}
+        className="w-5 h-5 flex items-center justify-center opacity-0 group-hover:opacity-100 text-[var(--color-text-secondary)] hover:text-[var(--color-accent-light)] transition-all"
+        title={hasChildren ? 'View wiki for this tag and its sub-tags' : 'View wiki article'}
+      >
+        <FileText className="w-3.5 h-3.5" strokeWidth={2} />
+      </button>
+      {/* Direct atom count. For parents this is the denormalized count of
+          atoms tagged *directly* with this tag (not the subtree); skip
+          rendering when it's 0 to avoid noise on category-only parents. */}
+      {(!hasChildren || tag.atom_count > 0) && (
+        <span className="text-xs text-[var(--color-text-tertiary)] tabular-nums">{tag.atom_count}</span>
       )}
-      {!hasChildren && <span className="text-xs text-[var(--color-text-tertiary)] tabular-nums">{tag.atom_count}</span>}
     </div>
   );
 });
