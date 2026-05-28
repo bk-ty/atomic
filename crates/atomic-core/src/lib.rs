@@ -2204,18 +2204,36 @@ impl AtomicCore {
     }
 
     /// Re-tag all embedding-complete atoms in the database. Removes
-    /// auto-source tag assignments whose tag has no wiki article, then queues
-    /// claimable atoms for tag-only pipeline processing. Manual assignments
-    /// and wiki-backed tag assignments are preserved.
+    /// auto-source tag assignments, then queues claimable atoms for tag-only
+    /// pipeline processing. Manual assignments are always preserved.
+    ///
+    /// `force_prune_wiki_backed` controls what happens to auto-tag rows whose
+    /// tag also has a wiki article:
+    /// - `false` (default): wiki-backed auto rows are preserved. The pruning
+    ///   step uses `delete_auto_tags_without_wiki`. This is the safe default —
+    ///   wiki articles continue to reference an atom set whose tags include
+    ///   them.
+    /// - `true`: every `source='auto'` row is dropped, including wiki-backed
+    ///   ones. Use during recovery from a polluted corpus where wiki articles
+    ///   were generated against the wrong tag set. Wiki articles themselves
+    ///   are NOT deleted; their tag references may become stale until a
+    ///   freshness audit reconciles them.
     ///
     /// Returns the number of atoms queued for re-tagging.
-    pub async fn retag_all_atoms<F>(&self, on_event: F) -> Result<i32, AtomicCoreError>
+    pub async fn retag_all_atoms<F>(
+        &self,
+        force_prune_wiki_backed: bool,
+        on_event: F,
+    ) -> Result<i32, AtomicCoreError>
     where
         F: Fn(EmbeddingEvent) + Send + Sync + Clone + 'static,
     {
         // Prune first so the re-extraction starts from a clean baseline.
-        // Manual rows and wiki-backed tag rows are preserved by the WHERE clause.
-        self.storage.delete_auto_tags_without_wiki_sync().await?;
+        if force_prune_wiki_backed {
+            self.storage.delete_all_auto_tags_sync().await?;
+        } else {
+            self.storage.delete_auto_tags_without_wiki_sync().await?;
+        }
 
         let atom_ids = self.storage.claim_all_for_retagging_sync().await?;
         let count = atom_ids.len() as i32;

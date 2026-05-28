@@ -468,6 +468,13 @@ pub trait ChunkStore: Send + Sync {
     /// while preserving manual assignments and wiki-backed tags.
     async fn delete_auto_tags_without_wiki(&self) -> StorageResult<i32>;
 
+    /// Delete every `atom_tags` row where `source = 'auto'`, regardless of
+    /// whether the tag has a wiki article. Returns the number of rows deleted.
+    /// Manual assignments are preserved. Use only when the operator explicitly
+    /// wants to drop wiki-backed auto tags (e.g. recovery from a polluted
+    /// corpus where wiki articles were generated against the wrong tag set).
+    async fn delete_all_auto_tags(&self) -> StorageResult<i32>;
+
     /// Atomically claim atoms that need edge computation: sets edges_status to 'processing'
     /// and returns their IDs.
     async fn claim_pending_edges(&self, limit: i32) -> StorageResult<Vec<String>>;
