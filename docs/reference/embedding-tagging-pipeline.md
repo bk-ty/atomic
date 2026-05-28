@@ -182,6 +182,71 @@ The queue says what work is requested. The atom columns say what state the atom 
 
 The backfill helpers enqueue from status columns for startup recovery, scheduled draft processing, and compatibility with flows that mark atoms pending before queueing.
 
+## Tag Catalog Gating
+
+Two mechanisms keep the auto-tagger working from a curated subset of the
+tag tree.
+
+### `is_autotag_target` (per-tag flag)
+
+Defined on every row of `tags`. The flag gates inclusion of **top-level
+parents** in the candidate tag tree the LLM sees.
+
+- `is_autotag_target = 1` on a top-level parent (`parent_id IS NULL`)
+  → the parent is shown to the LLM with up to 50 of its highest-atom-count
+  children.
+- `is_autotag_target = 0` on a top-level parent → the parent and all its
+  children are excluded from the LLM tree, regardless of atom counts.
+- The flag is **not** consulted on children: every child of an autotag
+  target inherits eligibility. A child with `is_autotag_target = 0` is
+  still loaded into the tree if it has atoms (or if it sits among the top
+  50 by atom count under its parent).
+
+The query lives in `crates/atomic-core/src/extraction.rs` in
+`get_tag_tree_for_llm` (sqlite path) and
+`crates/atomic-core/src/storage/postgres/tags.rs` in
+`get_tag_tree_for_llm` (postgres path). Both filter
+`parent_id IS NULL AND is_autotag_target = TRUE` at the top level.
+
+The migration `005_autotag_target.sql` backfills `Topics, People,
+Locations, Organizations, Events` to TRUE on existing databases. New
+top-level tags created via `set_tag_autotag_target` (admin UI) flip the
+flag explicitly. The 2026-05-28 audit confirmed live data is
+operator-correct: the user has chosen `Processes`, `Services`,
+`Knowledge` as autotag targets and intentionally excluded
+`Infrastructure` and `People` from the LLM's view.
+
+### Per-atom tagging cap (registry settings)
+
+Three registry settings (defaults shown) bound how many tags the LLM may
+return for a single atom. All three are enforced by `atomic-core` at the
+caller layer regardless of any user-supplied `tagging_prompt` override —
+a runaway prompt cannot blow past the configured cap.
+
+| Setting | Type | Default | Effect |
+|---|---|---|---|
+| `tagging_max_tags` | int | 5 | Schema `maxItems` and the "Maximum N tags" rule in the system prompt. |
+| `tagging_prefer_existing` | bool | `true` | Gates the "Prefer existing tags shown below over inventing new ones" rule. |
+| `tagging_max_new_tags` | int | 1 | Post-LLM filter: tags whose name is not already in the catalog (case-insensitive) are partitioned and truncated to this cap. Existing-name tags are never dropped. |
+
+Settings are re-resolved per atom in `process_tagging_atom_inner`, so a
+runtime change takes effect on the next ingest with no restart.
+
+`tagging_max_new_tags = 0` is a "tree-locked" mode: the LLM may not
+introduce any new names; only tags already in the catalog can be applied.
+Recommended for production once the catalog is fully descriptive (after
+T35 + T44 sweeps).
+
+### Recovery: clearing wiki-backed auto tags
+
+`POST /api/tagging/retag-all` accepts an optional JSON body
+`{"force_prune_wiki_backed": true}`. Default `false` preserves the
+legacy behavior (wiki-backed `source='auto'` rows survive the prune).
+`true` drops every `source='auto'` row regardless of wiki article. Use
+the force-prune mode during a corpus cleanup; it is the supported
+replacement for the manual SQL pattern in
+`scripts/retag-sweep-all.sh`.
+
 ## Test Harness
 
 The real-world-ish pipeline harness lives in:
