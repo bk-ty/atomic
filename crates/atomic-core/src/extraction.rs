@@ -117,80 +117,115 @@ Examples:
 
 Be conservative - only consolidate when truly warranted."#;
 
-const SYSTEM_PROMPT: &str = r#"You are a knowledge management assistant that categorizes text with tags.
+/// Per-call configuration for the LLM tagging step. Resolved from
+/// `tagging_max_tags` / `tagging_prefer_existing` (see `settings.rs`)
+/// at the caller layer and passed through to the schema + prompt
+/// builders so a `tagging_prompt` registry override cannot blow past
+/// the user-configured cap.
+#[derive(Debug, Clone, Copy)]
+pub struct TaggingConfig {
+    /// Hard cap on tags returned by the LLM. Mirrored into the JSON
+    /// schema's `maxItems` and into the system prompt's "Maximum N
+    /// tags" rule.
+    pub max_tags: usize,
+    /// When true, the system prompt includes the "Prefer existing tags
+    /// shown below over inventing new ones" rule. When false, the rule
+    /// is omitted entirely (the post-LLM `tagging_max_new_tags` filter
+    /// becomes the only mechanism keeping the tag set bounded).
+    pub prefer_existing: bool,
+}
 
-PURPOSE OF TAGS:
-Tags help users navigate and filter their content. Users browse by tag and generate wiki articles that synthesize all content under a tag. The job is therefore to identify the **primary subjects of THIS document** — not every topic the document happens to mention.
-
-CRITICAL RULES (most important):
-1. **Tag what the document IS ABOUT, not what it MENTIONS.** A meeting note that briefly says "we should monitor production" is NOT about Production Incidents. A runbook that uses Docker in one step is NOT about Docker. Apply a tag only if removing the topic would change what the document fundamentally is.
-2. **Maximum 5 tags. Fewer is better.** A focused 2-3 tag set beats an exhaustive 8-tag set every time. If you cannot justify a tag as a primary subject, leave it out.
-3. **Prefer existing tags shown below over inventing new ones.** Only invent a new Level 2 tag when no existing tag fits the document's actual subject.
-4. **Empty tag list is acceptable.** If no category below is a natural fit, return `{"tags": []}`. Do not force a poor match.
-
-TAG STRUCTURE:
-- Each tag MUST have a parent_name set to one of the existing top-level categories shown below
-- DO NOT create new top-level categories — use only the categories the user has provided
-- Tag names are case-insensitive and globally unique
-- Maximum 2 levels of hierarchy (Category → Specific Tag); no deeper nesting
-
-The user has chosen which top-level categories the auto-tagger may extend. Each is shown below with a sample of existing sub-tags as reference for the level of specificity in this system.
-
-RESPONSE FORMAT:
-Return a JSON object with a "tags" array. Each tag is `{"name": "<specific tag>", "parent_name": "<one of the categories below>"}`:
-{"tags": [{"name": "Production Incidents", "parent_name": "Processes"}]}
-
-Final guideline:
-- Prefer broad tags over overly specific ones (e.g., "John Smith" not "Early Life of John Smith")
-- Every tag must have a valid parent_name from the top-level categories listed below"#;
-
-const SYSTEM_PROMPT_WITH_GUIDANCE: &str = r#"You are a knowledge management assistant that categorizes text with tags.
-
-PURPOSE OF TAGS:
-Tags help users navigate and filter their content. Users browse by tag and generate wiki articles that synthesize all content under a tag. The job is therefore to identify the **primary subjects of THIS document** — not every topic the document happens to mention.
-
-CRITICAL RULES (most important):
-1. **Tag what the document IS ABOUT, not what it MENTIONS.** A meeting note that briefly says "we should monitor production" is NOT about Production Incidents. A runbook that uses Docker in one step is NOT about Docker. Apply a tag only if removing the topic would change what the document fundamentally is.
-2. **Maximum 5 tags. Fewer is better.** A focused 2-3 tag set beats an exhaustive 8-tag set every time. If you cannot justify a tag as a primary subject, leave it out.
-3. **Prefer existing tags shown below over inventing new ones.** Only invent a new Level 2 tag when no existing tag fits the document's actual subject.
-4. **Empty tag list is acceptable.** If no category below is a natural fit, return `{"tags": []}`. Do not force a poor match.
-5. **Honor each category's Description.** When a category lists a Description, use it as a strict scope rule for that category — do not file content that falls outside the description there.
-
-TAG STRUCTURE:
-- Each tag MUST have a parent_name set to one of the existing top-level categories shown below
-- DO NOT create new top-level categories — use only the categories the user has provided
-- Tag names are case-insensitive and globally unique
-- Maximum 2 levels of hierarchy (Category → Specific Tag); no deeper nesting
-
-The user has chosen which top-level categories the auto-tagger may extend. Each is shown below with optional guidance and a sample of existing sub-tags as reference for the level of specificity in this system.
-
-RESPONSE FORMAT:
-Return a JSON object with a "tags" array. Each tag is `{"name": "<specific tag>", "parent_name": "<one of the categories below>"}`:
-{"tags": [{"name": "Production Incidents", "parent_name": "Processes"}]}
-
-Final guideline:
-- Prefer broad tags over overly specific ones (e.g., "John Smith" not "Early Life of John Smith")
-- Every tag must have a valid parent_name from the top-level categories listed below"#;
-
-fn default_system_prompt_for_tag_tree(tag_tree_json: &str) -> &'static str {
-    if tag_tree_json.contains("\nDescription: ") {
-        SYSTEM_PROMPT_WITH_GUIDANCE
-    } else {
-        SYSTEM_PROMPT
+impl Default for TaggingConfig {
+    fn default() -> Self {
+        Self {
+            max_tags: 5,
+            prefer_existing: true,
+        }
     }
+}
+
+/// Build the system prompt for tag extraction. Templated by `TaggingConfig`
+/// (max_tags + prefer_existing) and by whether the tag tree includes any
+/// `Description: ` lines (which adds a category-scope rule).
+///
+/// Kept private; callers go through `default_system_prompt_for_tag_tree`.
+fn build_system_prompt(tag_tree_json: &str, config: &TaggingConfig) -> String {
+    let with_guidance = tag_tree_json.contains("\nDescription: ");
+
+    // Build the rules list dynamically so numbering stays sequential as
+    // optional rules drop in/out.
+    let mut rules: Vec<String> = Vec::with_capacity(5);
+    rules.push("**Tag what the document IS ABOUT, not what it MENTIONS.** A meeting note that briefly says \"we should monitor production\" is NOT about Production Incidents. A runbook that uses Docker in one step is NOT about Docker. Apply a tag only if removing the topic would change what the document fundamentally is.".to_string());
+    rules.push(format!(
+        "**Maximum {} tags. Fewer is better.** A focused 2-3 tag set beats an exhaustive 8-tag set every time. If you cannot justify a tag as a primary subject, leave it out.",
+        config.max_tags
+    ));
+    if config.prefer_existing {
+        rules.push("**Prefer existing tags shown below over inventing new ones.** Only invent a new Level 2 tag when no existing tag fits the document's actual subject.".to_string());
+    }
+    rules.push("**Empty tag list is acceptable.** If no category below is a natural fit, return `{\"tags\": []}`. Do not force a poor match.".to_string());
+    if with_guidance {
+        rules.push("**Honor each category's Description.** When a category lists a Description, use it as a strict scope rule for that category — do not file content that falls outside the description there.".to_string());
+    }
+    let rules_block = rules
+        .iter()
+        .enumerate()
+        .map(|(i, r)| format!("{}. {}", i + 1, r))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let preface_optional = if with_guidance {
+        "with optional guidance and "
+    } else {
+        ""
+    };
+
+    format!(
+        "You are a knowledge management assistant that categorizes text with tags.\n\
+\n\
+PURPOSE OF TAGS:\n\
+Tags help users navigate and filter their content. Users browse by tag and generate wiki articles that synthesize all content under a tag. The job is therefore to identify the **primary subjects of THIS document** — not every topic the document happens to mention.\n\
+\n\
+CRITICAL RULES (most important):\n\
+{rules_block}\n\
+\n\
+TAG STRUCTURE:\n\
+- Each tag MUST have a parent_name set to one of the existing top-level categories shown below\n\
+- DO NOT create new top-level categories — use only the categories the user has provided\n\
+- Tag names are case-insensitive and globally unique\n\
+- Maximum 2 levels of hierarchy (Category → Specific Tag); no deeper nesting\n\
+\n\
+The user has chosen which top-level categories the auto-tagger may extend. Each is shown below {preface_optional}a sample of existing sub-tags as reference for the level of specificity in this system.\n\
+\n\
+RESPONSE FORMAT:\n\
+Return a JSON object with a \"tags\" array. Each tag is `{{\"name\": \"<specific tag>\", \"parent_name\": \"<one of the categories below>\"}}`:\n\
+{{\"tags\": [{{\"name\": \"Production Incidents\", \"parent_name\": \"Processes\"}}]}}\n\
+\n\
+Final guideline:\n\
+- Prefer broad tags over overly specific ones (e.g., \"John Smith\" not \"Early Life of John Smith\")\n\
+- Every tag must have a valid parent_name from the top-level categories listed below"
+    )
+}
+
+/// Build the default system prompt for the given tag tree + config. The
+/// caller may override the result entirely via the `tagging_prompt`
+/// registry setting, but the schema cap (`maxItems`) and the post-LLM
+/// new-tag filter still apply regardless of the prompt source.
+fn default_system_prompt_for_tag_tree(tag_tree_json: &str, config: &TaggingConfig) -> String {
+    build_system_prompt(tag_tree_json, config)
 }
 
 /// JSON schema for tag extraction calls. Shared by `extract_tags_from_content`
 /// and `extract_tags_from_chunk`. Kept portable: all properties required,
 /// `additionalProperties: false`, no unions. See `providers::structured::lint_schema`
 /// for the full portability rule set.
-pub(crate) fn extraction_schema() -> serde_json::Value {
+pub(crate) fn extraction_schema(max_tags: usize) -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "properties": {
             "tags": {
                 "type": "array",
-                "maxItems": 5,
+                "maxItems": max_tags,
                 "items": {
                     "type": "object",
                     "properties": {
@@ -206,7 +241,10 @@ pub(crate) fn extraction_schema() -> serde_json::Value {
                     "required": ["name", "parent_name"],
                     "additionalProperties": false
                 },
-                "description": "Up to 5 tags identifying the document's primary subjects (not topics it merely mentions)"
+                "description": format!(
+                    "Up to {} tags identifying the document's primary subjects (not topics it merely mentions)",
+                    max_tags
+                )
             }
         },
         "required": ["tags"],
@@ -299,6 +337,7 @@ pub async fn extract_tags_from_content(
     model: &str,
     supported_params: Option<Vec<String>>,
     custom_system_prompt: Option<&str>,
+    config: &TaggingConfig,
 ) -> Result<Vec<TagApplication>, String> {
     let max_chars = max_tagging_chars(provider_config, tag_tree_json, model);
     let text = if content.len() > max_chars {
@@ -317,9 +356,14 @@ pub async fn extract_tags_from_content(
         tag_tree_json, text
     );
 
-    let system = custom_system_prompt
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| default_system_prompt_for_tag_tree(tag_tree_json));
+    let default_prompt;
+    let system: &str = match custom_system_prompt.filter(|s| !s.is_empty()) {
+        Some(s) => s,
+        None => {
+            default_prompt = default_system_prompt_for_tag_tree(tag_tree_json, config);
+            &default_prompt
+        }
+    };
     let messages = vec![Message::system(system), Message::user(user_content)];
 
     let call = StructuredCall::<ExtractionResult>::new(
@@ -327,7 +371,7 @@ pub async fn extract_tags_from_content(
         model,
         &messages,
         "extraction_result",
-        extraction_schema(),
+        extraction_schema(config.max_tags),
     )
     .with_params(extraction_params(supported_params))
     .with_max_retries(3);
@@ -348,14 +392,16 @@ pub async fn extract_tags_from_chunk(
     tag_tree_json: &str,
     model: &str,
     supported_params: Option<Vec<String>>,
+    config: &TaggingConfig,
 ) -> Result<Vec<TagApplication>, String> {
     let user_content = format!(
         "EXISTING TAG HIERARCHY:\n{}\n\nTEXT TO ANALYZE:\n{}",
         tag_tree_json, chunk_content
     );
 
+    let default_prompt = default_system_prompt_for_tag_tree(tag_tree_json, config);
     let messages = vec![
-        Message::system(default_system_prompt_for_tag_tree(tag_tree_json)),
+        Message::system(default_prompt),
         Message::user(user_content),
     ];
 
@@ -364,7 +410,7 @@ pub async fn extract_tags_from_chunk(
         model,
         &messages,
         "extraction_result",
-        extraction_schema(),
+        extraction_schema(config.max_tags),
     )
     .with_params(extraction_params(supported_params))
     .with_max_retries(3);
@@ -726,7 +772,7 @@ mod tests {
 
     #[test]
     fn lint_extraction_schema_is_portable() {
-        lint_schema(&extraction_schema())
+        lint_schema(&extraction_schema(5))
             .expect("extraction_schema must be portable across providers");
     }
 
@@ -844,10 +890,17 @@ mod tests {
         assert!(result.contains("Topics"));
         assert!(result
             .contains("Description: Use for subject-matter themes, not people or organizations."));
-        assert_eq!(
-            default_system_prompt_for_tag_tree(&result),
-            SYSTEM_PROMPT_WITH_GUIDANCE
+        // The default prompt is now templated by `TaggingConfig`. Build the
+        // expected prompt with the same default config and confirm the
+        // description-aware "Honor each category's Description" rule fires
+        // (which is what makes this `_with_guidance` variant distinct from
+        // the no-description variant).
+        let prompt = default_system_prompt_for_tag_tree(&result, &TaggingConfig::default());
+        assert!(
+            prompt.contains("Honor each category's Description."),
+            "with-guidance prompt must include the description-scope rule"
         );
+        assert!(prompt.contains("with optional guidance and"));
     }
 
     #[test]
@@ -1153,6 +1206,125 @@ mod tests {
         assert!(
             parent_exists,
             "Parent should NOT be deleted when it has other children"
+        );
+    }
+
+    // ==================== TaggingConfig + schema templating (T36) ====================
+
+    #[test]
+    fn extraction_schema_maxitems_tracks_config() {
+        for cap in [1usize, 3, 5, 7, 12] {
+            let s = extraction_schema(cap);
+            let m = s["properties"]["tags"]["maxItems"]
+                .as_u64()
+                .expect("maxItems must be a number");
+            assert_eq!(m as usize, cap, "maxItems must equal max_tags={cap}");
+            // Description string should also reflect the cap so the LLM
+            // sees a coherent number in both schema and prose.
+            let desc = s["properties"]["tags"]["description"]
+                .as_str()
+                .expect("description must be a string");
+            assert!(
+                desc.contains(&format!("Up to {cap} tags")),
+                "schema description must mention `Up to {cap} tags`, got: {desc}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_system_prompt_default_includes_maximum_five_and_prefer_existing() {
+        let prompt = build_system_prompt("(no existing tags)", &TaggingConfig::default());
+        assert!(
+            prompt.contains("Maximum 5 tags"),
+            "default config must surface `Maximum 5 tags`"
+        );
+        assert!(
+            prompt.contains("Prefer existing tags shown below"),
+            "default config must include the prefer-existing rule"
+        );
+        // No description in tree -> no description-scope rule.
+        assert!(
+            !prompt.contains("Honor each category's Description."),
+            "no-description tree must not surface the description-scope rule"
+        );
+        // Numbering should be sequential. Default+no-guidance => 4 rules.
+        for n in 1..=4 {
+            assert!(
+                prompt.contains(&format!("\n{n}. ")),
+                "rule {n} must be present"
+            );
+        }
+        assert!(
+            !prompt.contains("\n5. "),
+            "rule 5 must NOT appear without guidance + prefer_existing combined override"
+        );
+    }
+
+    #[test]
+    fn build_system_prompt_respects_max_tags_override() {
+        let cfg = TaggingConfig {
+            max_tags: 3,
+            prefer_existing: true,
+        };
+        let prompt = build_system_prompt("(no existing tags)", &cfg);
+        assert!(
+            prompt.contains("Maximum 3 tags"),
+            "max_tags=3 must surface `Maximum 3 tags`"
+        );
+        assert!(
+            !prompt.contains("Maximum 5 tags"),
+            "stale `Maximum 5 tags` literal must not leak through"
+        );
+    }
+
+    #[test]
+    fn build_system_prompt_omits_prefer_existing_when_disabled() {
+        let cfg = TaggingConfig {
+            max_tags: 5,
+            prefer_existing: false,
+        };
+        let prompt = build_system_prompt("(no existing tags)", &cfg);
+        assert!(
+            !prompt.contains("Prefer existing tags shown below"),
+            "prefer_existing=false must drop the prefer-existing rule"
+        );
+        // With prefer_existing=false and no guidance there should be exactly
+        // 3 numbered rules (1=ABOUT/MENTIONS, 2=Maximum, 3=Empty acceptable).
+        for n in 1..=3 {
+            assert!(
+                prompt.contains(&format!("\n{n}. ")),
+                "rule {n} must still be present"
+            );
+        }
+        assert!(
+            !prompt.contains("\n4. "),
+            "no rule 4 expected when prefer_existing=false and no guidance present"
+        );
+    }
+
+    #[test]
+    fn build_system_prompt_adds_description_rule_when_guidance_present() {
+        let tree_with_guidance =
+            "Topics\nDescription: Use for subject-matter themes, not people.\n├── Foo";
+        let prompt = build_system_prompt(tree_with_guidance, &TaggingConfig::default());
+        assert!(
+            prompt.contains("Honor each category's Description."),
+            "guidance must surface the description-scope rule"
+        );
+        assert!(
+            prompt.contains("with optional guidance and"),
+            "preface phrasing must reflect that guidance is present"
+        );
+        // Default + guidance => 5 rules.
+        for n in 1..=5 {
+            assert!(
+                prompt.contains(&format!("\n{n}. ")),
+                "rule {n} must be present in guidance variant"
+            );
+        }
+        assert!(
+            !prompt.contains("\n6. "),
+            "no rule 6 expected"
         );
     }
 }

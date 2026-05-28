@@ -926,6 +926,28 @@ async fn process_tagging_only_inner(
                         .get("tagging_prompt")
                         .filter(|s| !s.is_empty())
                         .map(|s| s.as_str());
+
+                    // Resolve the per-atom tagging cap from registry. All
+                    // three settings live in `DEFAULT_SETTINGS`; this
+                    // re-resolves on every atom so a runtime change takes
+                    // effect on the next ingest with no restart.
+                    let max_tags: usize = settings_map
+                        .get("tagging_max_tags")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(5);
+                    let prefer_existing: bool = settings_map
+                        .get("tagging_prefer_existing")
+                        .map(|s| s == "true")
+                        .unwrap_or(true);
+                    let max_new_tags: usize = settings_map
+                        .get("tagging_max_new_tags")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(1);
+                    let tagging_cfg = crate::extraction::TaggingConfig {
+                        max_tags,
+                        prefer_existing,
+                    };
+
                     let tags = run_tagging_strategy(
                         tagging_strategy,
                         &provider_config,
@@ -934,16 +956,58 @@ async fn process_tagging_only_inner(
                         &tagging_model,
                         supported_params,
                         custom_tagging_prompt,
+                        &tagging_cfg,
                     )
                     .await?;
 
-                    for tag_application in tags {
-                        let trimmed_name = tag_application.name.trim();
+                    // Partition LLM-returned tags into ones whose name
+                    // already exists (case-insensitive) and ones that
+                    // would be net-new. Cap the net-new bucket to
+                    // `tagging_max_new_tags`. Existing-name tags are
+                    // never dropped — the schema cap (`max_tags`) and
+                    // the prompt already gate the total.
+                    let existing_names: std::collections::HashSet<String> = storage
+                        .get_all_tags_impl()
+                        .await
+                        .map(|tags| {
+                            tags.into_iter()
+                                .map(|t| t.tag.name.to_ascii_lowercase())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let mut existing_apps: Vec<crate::extraction::TagApplication> =
+                        Vec::new();
+                    let mut new_apps: Vec<crate::extraction::TagApplication> =
+                        Vec::new();
+                    for app in tags {
+                        let trimmed_name = app.name.trim();
                         if trimmed_name.is_empty()
                             || trimmed_name.eq_ignore_ascii_case("null")
                         {
                             continue;
                         }
+                        if existing_names
+                            .contains(&trimmed_name.to_ascii_lowercase())
+                        {
+                            existing_apps.push(app);
+                        } else {
+                            new_apps.push(app);
+                        }
+                    }
+                    if new_apps.len() > max_new_tags {
+                        let dropped = new_apps.len() - max_new_tags;
+                        tracing::info!(
+                            atom_id = %atom_id,
+                            dropped,
+                            max_new_tags,
+                            "post-LLM cap dropping excess net-new tags"
+                        );
+                        new_apps.truncate(max_new_tags);
+                    }
+
+                    for tag_application in
+                        existing_apps.into_iter().chain(new_apps.into_iter())
+                    {
                         match storage
                             .get_or_create_tag_impl(
                                 &tag_application.name,
@@ -1003,6 +1067,7 @@ async fn run_tagging_strategy(
     model: &str,
     supported_params: Option<Vec<String>>,
     custom_system_prompt: Option<&str>,
+    config: &crate::extraction::TaggingConfig,
 ) -> Result<Vec<crate::extraction::TagApplication>, String> {
     match strategy {
         TaggingStrategy::TruncatedFullContent | TaggingStrategy::KnnThenLlm => {
@@ -1013,6 +1078,7 @@ async fn run_tagging_strategy(
                 model,
                 supported_params,
                 custom_system_prompt,
+                config,
             )
             .await
         }
@@ -1027,6 +1093,7 @@ async fn run_tagging_strategy(
                 model,
                 supported_params,
                 custom_system_prompt,
+                config,
             )
             .await
         }
