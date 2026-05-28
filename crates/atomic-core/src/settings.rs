@@ -83,8 +83,8 @@ pub const DEFAULT_SETTINGS: &[(&str, &str)] = &[
     // for content that resembles existing atoms (recurring meetings, repeated
     // topics). Falls through to the LLM strategy when no tag clears consensus.
     ("knn_tagging_k", "10"),
-    ("knn_tagging_min_consensus", "3"),
-    ("knn_tagging_min_similarity", "0.55"),
+    ("knn_tagging_min_consensus", "5"),
+    ("knn_tagging_min_similarity", "0.65"),
     // Scheduled tasks — see crate::scheduler::state for key format
     ("task.daily_briefing.enabled", "true"),
     ("task.daily_briefing.interval_hours", "24"),
