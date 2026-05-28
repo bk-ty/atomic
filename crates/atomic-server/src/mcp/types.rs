@@ -125,6 +125,39 @@ pub struct IngestUrlParams {
     pub url: String,
 }
 
+/// Input parameters for tag_health_report tool. All thresholds are
+/// optional; defaults match the audit guidance from 2026-05-28
+/// (avg=6.0, top_rate=0.5, single_child=5, p95=8.0).
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct TagHealthReportParams {
+    /// Override avg_tags_per_atom regression threshold (default 6.0).
+    pub avg_threshold: Option<f64>,
+    /// Override top_tag_rate regression threshold (default 0.5).
+    pub top_rate_threshold: Option<f64>,
+    /// Override single_child_subtrees regression threshold (default 5).
+    pub single_child_threshold: Option<i64>,
+    /// Override p95 tags-per-atom regression threshold (default 8.0).
+    pub p95_threshold: Option<f64>,
+    /// Top-N tags scanned for 100%-overlap pair detection (default 50).
+    pub overlap_top_n: Option<usize>,
+    /// Atom-count below which a tag is counted as low-visibility (default 3).
+    pub low_visibility_atom_count: Option<i32>,
+}
+
+impl Default for TagHealthReportParams {
+    fn default() -> Self {
+        Self {
+            avg_threshold: None,
+            top_rate_threshold: None,
+            single_child_threshold: None,
+            p95_threshold: None,
+            overlap_top_n: None,
+            low_visibility_atom_count: None,
+        }
+    }
+}
+
 // ==================== Tool Output Types ====================
 
 /// A search result with atom content and similarity score

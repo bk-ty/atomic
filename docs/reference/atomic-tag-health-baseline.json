@@ -1,0 +1,268 @@
+{
+  "computed_at": "2026-05-28T20:07:55.599653+00:00",
+  "total_atoms": 288,
+  "total_tags": 95,
+  "tagged_atoms": 287,
+  "total_tag_assignments": 1079,
+  "avg_tags_per_atom": 3.7465,
+  "median_tags_per_atom": 4.0,
+  "p95_tags_per_atom": 5.0,
+  "max_tags_per_atom": 33,
+  "tag_count_distribution": {
+    "25": 1,
+    "4": 105,
+    "2": 40,
+    "3": 95,
+    "6": 7,
+    "29": 1,
+    "7": 2,
+    "5": 29,
+    "33": 1,
+    "1": 6
+  },
+  "top_tag_rate": 0.3854,
+  "top_tags": [
+    {
+      "id": "d041e205-4215-4d12-a177-1a4639042127",
+      "name": "Engineering Workflow",
+      "atom_count": 111,
+      "rate": 0.3854
+    },
+    {
+      "id": "a6857d27-f43c-4a50-9298-65032b271b91",
+      "name": "Arkansas Migration",
+      "atom_count": 66,
+      "rate": 0.2292
+    },
+    {
+      "id": "395c453a-45b1-4fc6-94a5-a41446c5d664",
+      "name": "Deployment Process",
+      "atom_count": 62,
+      "rate": 0.2153
+    },
+    {
+      "id": "a35551f0-124b-48aa-83f0-e4686e20ebb0",
+      "name": "Standards",
+      "atom_count": 57,
+      "rate": 0.1979
+    },
+    {
+      "id": "19b7d224-5cb8-4556-b214-f905b670aa53",
+      "name": "Network Infrastructure",
+      "atom_count": 48,
+      "rate": 0.1667
+    },
+    {
+      "id": "e43dc3f8-8a52-4ced-a8cf-a76c672c3929",
+      "name": "Production Incidents",
+      "atom_count": 48,
+      "rate": 0.1667
+    },
+    {
+      "id": "32f7ef45-8c2a-4cec-95e2-bbc8b372ef00",
+      "name": "Service Catalog",
+      "atom_count": 46,
+      "rate": 0.1597
+    },
+    {
+      "id": "5b717a96-71ce-4ca7-92c6-c77885b78ff9",
+      "name": "GitHub Integration",
+      "atom_count": 37,
+      "rate": 0.1285
+    },
+    {
+      "id": "d2e70c23-01f1-4c52-8432-c1dccb6aa427",
+      "name": "Accounts Receivable Playbook",
+      "atom_count": 32,
+      "rate": 0.1111
+    },
+    {
+      "id": "0fee02a6-afa1-472b-935e-c6c3b12ba6c4",
+      "name": "Jenkins Jobs",
+      "atom_count": 32,
+      "rate": 0.1111
+    }
+  ],
+  "single_child_subtrees": 4,
+  "single_child_examples": [
+    {
+      "parent_id": "295f1734-bed4-4a57-b576-c754b83a0b9f",
+      "parent_name": "Jenkins Infrastructure",
+      "only_child_id": "f4233aec-74bf-4e79-990c-4b7e7ffbd9b1",
+      "only_child_name": "Jenkins Jobs Configuration"
+    },
+    {
+      "parent_id": "9eb9bf6b-b490-45b5-99d2-53d47dff7deb",
+      "parent_name": "Vendors",
+      "only_child_id": "f3ce717b-6fc1-4486-91a4-cea62627ed71",
+      "only_child_name": "Tyler Technologies"
+    },
+    {
+      "parent_id": "a83596dc-fdaf-4a9c-93ba-5580052a66b0",
+      "parent_name": "Compliance & Governance",
+      "only_child_id": "6f6ece16-4aa1-456a-a34e-edd58e56bc83",
+      "only_child_name": "Security Baseline"
+    },
+    {
+      "parent_id": "d9aab329-7d1d-4b22-90db-3a0636cd42ed",
+      "parent_name": "AWS Infrastructure",
+      "only_child_id": "88521874-7b59-440f-a011-81b8ed23e756",
+      "only_child_name": "Cloud Architecture"
+    }
+  ],
+  "junk_drawer_tags": [
+    {
+      "tag_id": "42d56dff-203a-4fc8-a43d-afe255674bf0",
+      "tag_name": "Templates",
+      "direct_atoms": 31,
+      "subtree_atoms": 31,
+      "ratio": 1.0
+    },
+    {
+      "tag_id": "0f46fd83-34db-4abd-b91f-52c62bf8ca62",
+      "tag_name": "Project Management",
+      "direct_atoms": 22,
+      "subtree_atoms": 22,
+      "ratio": 1.0
+    },
+    {
+      "tag_id": "d9aab329-7d1d-4b22-90db-3a0636cd42ed",
+      "tag_name": "AWS Infrastructure",
+      "direct_atoms": 3,
+      "subtree_atoms": 3,
+      "ratio": 1.0
+    },
+    {
+      "tag_id": "a83596dc-fdaf-4a9c-93ba-5580052a66b0",
+      "tag_name": "Compliance & Governance",
+      "direct_atoms": 3,
+      "subtree_atoms": 3,
+      "ratio": 1.0
+    },
+    {
+      "tag_id": "295f1734-bed4-4a57-b576-c754b83a0b9f",
+      "tag_name": "Jenkins Infrastructure",
+      "direct_atoms": 2,
+      "subtree_atoms": 2,
+      "ratio": 1.0
+    },
+    {
+      "tag_id": "d041e205-4215-4d12-a177-1a4639042127",
+      "tag_name": "Engineering Workflow",
+      "direct_atoms": 111,
+      "subtree_atoms": 113,
+      "ratio": 0.9823008849557522
+    },
+    {
+      "tag_id": "a35551f0-124b-48aa-83f0-e4686e20ebb0",
+      "tag_name": "Standards",
+      "direct_atoms": 57,
+      "subtree_atoms": 59,
+      "ratio": 0.9661016949152542
+    },
+    {
+      "tag_id": "90a99679-03b1-4453-9cab-b59f283d9ebc",
+      "tag_name": "Meetings",
+      "direct_atoms": 27,
+      "subtree_atoms": 29,
+      "ratio": 0.9310344827586207
+    },
+    {
+      "tag_id": "754ecc5f-ae23-4193-b5d0-9319ddfc17fe",
+      "tag_name": "Developer Wellbeing",
+      "direct_atoms": 2,
+      "subtree_atoms": 3,
+      "ratio": 0.6666666666666666
+    },
+    {
+      "tag_id": "9eb9bf6b-b490-45b5-99d2-53d47dff7deb",
+      "tag_name": "Vendors",
+      "direct_atoms": 5,
+      "subtree_atoms": 8,
+      "ratio": 0.625
+    }
+  ],
+  "hundred_pct_overlap_pairs": [
+    {
+      "tag_a_id": "4bc617e0-01be-4730-a691-c9860573e36f",
+      "tag_a_name": "AI Tools & Integration",
+      "tag_b_id": "d9aab329-7d1d-4b22-90db-3a0636cd42ed",
+      "tag_b_name": "AWS Infrastructure",
+      "atom_count": 3
+    },
+    {
+      "tag_a_id": "4bc617e0-01be-4730-a691-c9860573e36f",
+      "tag_a_name": "AI Tools & Integration",
+      "tag_b_id": "a83596dc-fdaf-4a9c-93ba-5580052a66b0",
+      "tag_b_name": "Compliance & Governance",
+      "atom_count": 3
+    },
+    {
+      "tag_a_id": "4bc617e0-01be-4730-a691-c9860573e36f",
+      "tag_a_name": "AI Tools & Integration",
+      "tag_b_id": "dcc5c8c8-1ad3-4e66-a18a-84ff06cc56ff",
+      "tag_b_name": "Documentation Standards",
+      "atom_count": 3
+    },
+    {
+      "tag_a_id": "4bc617e0-01be-4730-a691-c9860573e36f",
+      "tag_a_name": "AI Tools & Integration",
+      "tag_b_id": "3bd5fca7-e24b-4be8-ae3e-97d998cc3ba6",
+      "tag_b_name": "GitHub Actions Migration",
+      "atom_count": 3
+    },
+    {
+      "tag_a_id": "d9aab329-7d1d-4b22-90db-3a0636cd42ed",
+      "tag_a_name": "AWS Infrastructure",
+      "tag_b_id": "a83596dc-fdaf-4a9c-93ba-5580052a66b0",
+      "tag_b_name": "Compliance & Governance",
+      "atom_count": 3
+    },
+    {
+      "tag_a_id": "d9aab329-7d1d-4b22-90db-3a0636cd42ed",
+      "tag_a_name": "AWS Infrastructure",
+      "tag_b_id": "dcc5c8c8-1ad3-4e66-a18a-84ff06cc56ff",
+      "tag_b_name": "Documentation Standards",
+      "atom_count": 3
+    },
+    {
+      "tag_a_id": "d9aab329-7d1d-4b22-90db-3a0636cd42ed",
+      "tag_a_name": "AWS Infrastructure",
+      "tag_b_id": "3bd5fca7-e24b-4be8-ae3e-97d998cc3ba6",
+      "tag_b_name": "GitHub Actions Migration",
+      "atom_count": 3
+    },
+    {
+      "tag_a_id": "a83596dc-fdaf-4a9c-93ba-5580052a66b0",
+      "tag_a_name": "Compliance & Governance",
+      "tag_b_id": "dcc5c8c8-1ad3-4e66-a18a-84ff06cc56ff",
+      "tag_b_name": "Documentation Standards",
+      "atom_count": 3
+    },
+    {
+      "tag_a_id": "a83596dc-fdaf-4a9c-93ba-5580052a66b0",
+      "tag_a_name": "Compliance & Governance",
+      "tag_b_id": "3bd5fca7-e24b-4be8-ae3e-97d998cc3ba6",
+      "tag_b_name": "GitHub Actions Migration",
+      "atom_count": 3
+    },
+    {
+      "tag_a_id": "dcc5c8c8-1ad3-4e66-a18a-84ff06cc56ff",
+      "tag_a_name": "Documentation Standards",
+      "tag_b_id": "3bd5fca7-e24b-4be8-ae3e-97d998cc3ba6",
+      "tag_b_name": "GitHub Actions Migration",
+      "atom_count": 3
+    }
+  ],
+  "low_visibility_tags_count": 40,
+  "never_used_tags_count": 17,
+  "regressions": [],
+  "thresholds": {
+    "avg_tags_per_atom_max": 6.0,
+    "top_tag_rate_max": 0.5,
+    "single_child_subtrees_max": 5,
+    "p95_tags_per_atom_max": 8.0,
+    "overlap_top_n": 50,
+    "low_visibility_atom_count": 3
+  }
+}

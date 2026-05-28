@@ -95,6 +95,28 @@ pub enum Command {
         #[command(subcommand)]
         action: TokenAction,
     },
+    /// Print a tag-health report as JSON to stdout (useful for cron / baseline snapshots).
+    TagHealthReport {
+        /// Storage backend: "sqlite" (default) or "postgres".
+        #[arg(long, default_value = "sqlite", env = "ATOMIC_STORAGE", global = true)]
+        storage: String,
+
+        /// Postgres connection string (required when --storage=postgres).
+        #[arg(long, env = "ATOMIC_DATABASE_URL", global = true)]
+        database_url: Option<String>,
+
+        /// Database to read (UUID or name). Defaults to the active database.
+        #[arg(long)]
+        database: Option<String>,
+
+        /// Override `avg_tags_per_atom` regression threshold (default 6.0).
+        #[arg(long)]
+        avg_threshold: Option<f64>,
+
+        /// Override `top_tag_rate` regression threshold (default 0.5).
+        #[arg(long)]
+        top_rate_threshold: Option<f64>,
+    },
 }
 
 #[derive(Subcommand, Debug)]

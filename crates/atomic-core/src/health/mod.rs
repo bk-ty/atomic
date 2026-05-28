@@ -18,6 +18,7 @@
 //! | [`audit`]            | health_fix_log read/write                         |
 //! | [`score`]            | weighted aggregation                              |
 //! | [`types`]            | public data types                                 |
+//! | [`tag_report`]       | structural tag-health report (T46)                |
 //! | [`link_resolution`]  | wikilink + markdown link parsing                  |
 //! | [`task`], [`gc_task`]| background scheduled jobs                         |
 //!
@@ -37,6 +38,7 @@ pub mod link_resolution;
 pub mod llm_fixes;
 pub mod run_fix;
 pub mod score;
+pub mod tag_report;
 pub mod task;
 pub mod types;
 
@@ -45,6 +47,11 @@ pub mod types;
 pub use compute::{compute_health, compute_single_check};
 pub use run_fix::run_fix;
 pub use score::aggregate_score;
+pub use tag_report::{
+    compute_from_raw as compute_tag_health_from_raw, compute_tag_health_report, OverlapPair,
+    ParentDirectRatioEntry, Regression as TagHealthRegression, SingleChildSubtree, TagHealthRawData,
+    TagHealthReport, TagHealthThresholds, TagRow, TopTagEntry,
+};
 pub use types::{
     AtomPreview, BoilerplateAtomEntry, ContradictionAtom, ContradictionPairEntry,
     DuplicatePair, FixAction, FixRequest, FixResponse, FixTier, HealthCheckOverride,
