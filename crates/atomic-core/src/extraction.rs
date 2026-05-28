@@ -422,10 +422,12 @@ pub fn get_tag_tree_for_llm(conn: &Connection) -> Result<String, String> {
             result.push('\n');
         }
 
-        // Query top 50 children by atom count
+        // Query top 50 children by atom count, including their autotag_description
+        // so the LLM sees disambiguation hints on individual children too — not
+        // just on top-level parents. Empty descriptions are skipped at print time.
         let mut children_stmt = conn
             .prepare(
-                "SELECT t.name, COUNT(at.atom_id) as atom_count
+                "SELECT t.name, t.autotag_description, COUNT(at.atom_id) as atom_count
                  FROM tags t
                  LEFT JOIN atom_tags at ON t.id = at.tag_id
                  WHERE t.parent_id = ?1
@@ -435,14 +437,14 @@ pub fn get_tag_tree_for_llm(conn: &Connection) -> Result<String, String> {
             )
             .map_err(|e| format!("Failed to prepare children query: {}", e))?;
 
-        let children: Vec<String> = children_stmt
-            .query_map([parent_id], |row| row.get(0))
+        let children: Vec<(String, String)> = children_stmt
+            .query_map([parent_id], |row| Ok((row.get(0)?, row.get(1)?)))
             .map_err(|e| format!("Failed to query children: {}", e))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| format!("Failed to collect children: {}", e))?;
 
         // Add children with tree formatting
-        for (j, child_name) in children.iter().enumerate() {
+        for (j, (child_name, child_description)) in children.iter().enumerate() {
             let is_last_child = j == children.len() - 1;
             let connector = if is_last_child {
                 "└── "
@@ -452,6 +454,14 @@ pub fn get_tag_tree_for_llm(conn: &Connection) -> Result<String, String> {
             result.push_str(connector);
             result.push_str(child_name);
             result.push('\n');
+            let child_description = child_description.trim();
+            if !child_description.is_empty() {
+                let indent = if is_last_child { "    " } else { "│   " };
+                result.push_str(indent);
+                result.push_str("  Description: ");
+                result.push_str(child_description);
+                result.push('\n');
+            }
         }
 
         // Add blank line between categories (except after the last one)
@@ -837,6 +847,47 @@ mod tests {
         assert_eq!(
             default_system_prompt_for_tag_tree(&result),
             SYSTEM_PROMPT_WITH_GUIDANCE
+        );
+    }
+
+    #[test]
+    fn test_get_tag_tree_for_llm_includes_child_autotag_description() {
+        let (db, _temp) = create_test_db();
+        let conn = db.conn.lock().unwrap();
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let parent_id = uuid::Uuid::new_v4().to_string();
+        let child_id = uuid::Uuid::new_v4().to_string();
+
+        conn.execute(
+            "INSERT INTO tags (id, name, parent_id, created_at, is_autotag_target, autotag_description)
+             VALUES (?1, ?2, NULL, ?3, 1, ?4)",
+            rusqlite::params![&parent_id, "Processes", &now, ""],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO tags (id, name, parent_id, created_at, is_autotag_target, autotag_description)
+             VALUES (?1, ?2, ?3, ?4, 0, ?5)",
+            rusqlite::params![
+                &child_id,
+                "Production Incidents",
+                &parent_id,
+                &now,
+                "ABOUT specific outage events. NOT for runbooks or postmortem references.",
+            ],
+        )
+        .unwrap();
+
+        let result = get_tag_tree_for_llm(&conn).unwrap();
+
+        assert!(result.contains("Processes"), "should contain parent");
+        assert!(
+            result.contains("Production Incidents"),
+            "should contain child"
+        );
+        assert!(
+            result.contains("Description: ABOUT specific outage events"),
+            "should inject child autotag_description below child name"
         );
     }
 
