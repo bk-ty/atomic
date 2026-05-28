@@ -667,9 +667,13 @@ async fn run_draft_save_then_finalize(backend: Backend) {
     .await
     .expect("draft save should succeed");
 
+    // Draft save preserves the prior pipeline status — `update_atom_content_only`
+    // explicitly does NOT retrigger embedding/tagging. The atom was finalized to
+    // "complete" by `create_and_await`; that must survive the draft write.
     let after_draft = core.get_atom(&atom_id).await.unwrap().expect("atom exists");
-    assert_eq!(after_draft.atom.embedding_status, "pending");
-    assert_eq!(after_draft.atom.tagging_status, "pending");
+    assert_eq!(after_draft.atom.embedding_status, "complete");
+    assert_eq!(after_draft.atom.tagging_status, "complete");
+    assert_eq!(after_draft.atom.content, "biology cells organisms dna evolution");
 
     let (cb, mut rx) = event_collector();
     core.process_atom_pipeline(&atom_id, cb)

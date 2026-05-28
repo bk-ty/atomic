@@ -505,56 +505,40 @@ impl SqliteStorage {
                     atoms_fts_insert(&conn, id)?;
                     replace_atom_links_for_content(&conn, id, &request.content, updated_at)?;
                 } else {
+                    // Content-only update path: preserve embedding_status /
+                    // tagging_status regardless of whether content changed.
+                    // The caller asked for a "save without retriggering the
+                    // pipeline" — flipping status to pending here was a
+                    // copy-paste from the reset branch above and silently
+                    // forced every minor edit to re-embed and re-tag.
                     if content_changed {
                         atoms_fts_delete(&conn, id)?;
-                        conn.execute(
-                            "UPDATE atoms
-                             SET content = ?1,
-                                 source_url = ?2,
-                                 source = ?3,
-                                 published_at = ?4,
-                                 updated_at = ?5,
-                                 embedding_status = ?6,
-                                 tagging_status = ?7,
-                                 embedding_error = NULL,
-                                 tagging_error = NULL,
-                                 title = ?8,
-                                 snippet = ?9
-                             WHERE id = ?10",
-                            (
-                                &request.content,
-                                &request.source_url,
-                                &source,
-                                &request.published_at,
-                                updated_at,
-                                "pending",
-                                "pending",
-                                &title,
-                                &snippet,
-                                id,
-                            ),
-                        )?;
-                        atoms_fts_insert(&conn, id)?;
-                        replace_atom_links_for_content(&conn, id, &request.content, updated_at)?;
-                    } else {
-                        // Content unchanged — FTS stays in sync without a resync.
-                        conn.execute(
-                            "UPDATE atoms SET content = ?1, source_url = ?2, source = ?3, published_at = ?4, updated_at = ?5,
-                             title = ?6, snippet = ?7
-                             WHERE id = ?8",
-                            (
-                                &request.content,
-                                &request.source_url,
-                                &source,
-                                &request.published_at,
-                                updated_at,
-                                &title,
-                                &snippet,
-                                id,
-                            ),
-                        )?;
-                        replace_atom_links_for_content(&conn, id, &request.content, updated_at)?;
                     }
+                    conn.execute(
+                        "UPDATE atoms
+                         SET content = ?1,
+                             source_url = ?2,
+                             source = ?3,
+                             published_at = ?4,
+                             updated_at = ?5,
+                             title = ?6,
+                             snippet = ?7
+                         WHERE id = ?8",
+                        (
+                            &request.content,
+                            &request.source_url,
+                            &source,
+                            &request.published_at,
+                            updated_at,
+                            &title,
+                            &snippet,
+                            id,
+                        ),
+                    )?;
+                    if content_changed {
+                        atoms_fts_insert(&conn, id)?;
+                    }
+                    replace_atom_links_for_content(&conn, id, &request.content, updated_at)?;
                 }
 
                 if let Some(ref tag_ids) = request.tag_ids {
