@@ -517,9 +517,13 @@ impl SqliteStorage {
             .map_err(AtomicCoreError::Embedding)
     }
 
-    pub(crate) fn get_tag_tree_for_llm_impl(&self) -> StorageResult<String> {
+    pub(crate) fn get_tag_tree_for_llm_impl(
+        &self,
+        min_visibility_atoms: i32,
+    ) -> StorageResult<String> {
         let conn = self.db.read_conn()?;
-        crate::extraction::get_tag_tree_for_llm(&conn).map_err(|e| AtomicCoreError::Validation(e))
+        crate::extraction::get_tag_tree_for_llm_with_visibility(&conn, min_visibility_atoms)
+            .map_err(|e| AtomicCoreError::Validation(e))
     }
 
     pub(crate) fn compute_tag_centroids_batch_impl(&self, tag_ids: &[String]) -> StorageResult<()> {
@@ -652,8 +656,8 @@ impl TagStore for SqliteStorage {
         self.link_tags_to_atom_impl(atom_id, tag_ids)
     }
 
-    async fn get_tag_tree_for_llm(&self) -> StorageResult<String> {
-        self.get_tag_tree_for_llm_impl()
+    async fn get_tag_tree_for_llm(&self, min_visibility_atoms: i32) -> StorageResult<String> {
+        self.get_tag_tree_for_llm_impl(min_visibility_atoms)
     }
 
     async fn compute_tag_centroids_batch(&self, tag_ids: &[String]) -> StorageResult<()> {

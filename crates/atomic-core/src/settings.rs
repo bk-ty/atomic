@@ -88,6 +88,12 @@ pub const DEFAULT_SETTINGS: &[(&str, &str)] = &[
     ("tagging_max_tags", "5"),
     ("tagging_prefer_existing", "true"),
     ("tagging_max_new_tags", "1"),
+    // Hide children whose `atom_count` is below the threshold from the
+    // candidate tag tree the LLM sees. Default `0` (disabled) preserves
+    // pre-T37 behavior. Children with `is_autotag_target = 1` are exempt.
+    // A cold-start safeguard disables the filter when fewer than 5
+    // children remain (see `extraction::get_tag_tree_for_llm_with_visibility`).
+    ("tagging_min_visibility_atoms", "0"),
     // k-NN tag inheritance — propagates tags from semantically nearest
     // already-tagged atoms before/instead of the LLM tagger. Sure-fire path
     // for content that resembles existing atoms (recurring meetings, repeated

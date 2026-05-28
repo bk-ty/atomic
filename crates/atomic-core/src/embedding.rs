@@ -900,8 +900,16 @@ async fn process_tagging_only_inner(
                     };
 
                 // Tag tree for LLM context (only top-level autotag targets).
+                // Visibility threshold for the candidate tree. Default 0
+                // (no filtering). Children with `is_autotag_target=1` are
+                // exempt; the SQL layer also falls back to unfiltered when
+                // fewer than 5 children would survive the filter.
+                let min_visibility_atoms: i32 = settings_map
+                    .get("tagging_min_visibility_atoms")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
                 let tag_tree_json = storage
-                    .get_tag_tree_for_llm_impl()
+                    .get_tag_tree_for_llm_impl(min_visibility_atoms)
                     .await
                     .map_err(|e| e.to_string())?;
 

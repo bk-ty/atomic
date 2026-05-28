@@ -219,6 +219,80 @@ impl PostgresStorage {
 
         Ok((true, atoms_retagged))
     }
+
+    /// Build the LLM-facing tag tree, applying a visibility filter when
+    /// `min_visibility_atoms > 0`. Returns `(tree_string, total_children)`
+    /// — the second slot lets the caller decide whether to fall back to
+    /// the unfiltered tree on cold start.
+    ///
+    /// Children are kept when `count >= threshold OR is_autotag_target = TRUE`,
+    /// matching the SQLite path in `crate::extraction::build_tag_tree`.
+    async fn build_tag_tree_pg(
+        &self,
+        min_visibility_atoms: i32,
+    ) -> StorageResult<(String, usize)> {
+        let top_level_tags: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT id, name, autotag_description
+             FROM tags
+             WHERE parent_id IS NULL AND is_autotag_target = TRUE AND db_id = $1
+             ORDER BY name",
+        )
+        .bind(&self.db_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+
+        if top_level_tags.is_empty() {
+            return Ok(("(no existing tags)".to_string(), 0));
+        }
+
+        let mut result = String::new();
+        let mut total_children: usize = 0;
+
+        for (parent_id, parent_name, description) in &top_level_tags {
+            result.push_str(parent_name);
+            result.push('\n');
+            let description = description.trim();
+            if !description.is_empty() {
+                result.push_str("Description: ");
+                result.push_str(description);
+                result.push('\n');
+            }
+
+            let children: Vec<(String,)> = sqlx::query_as(
+                "SELECT t.name
+                 FROM tags t
+                 LEFT JOIN atom_tags at ON t.id = at.tag_id
+                 WHERE t.parent_id = $1 AND t.db_id = $2
+                 GROUP BY t.id, t.name, t.is_autotag_target
+                 HAVING COUNT(at.atom_id) >= $3 OR t.is_autotag_target = TRUE
+                 ORDER BY COUNT(at.atom_id) DESC, t.name ASC
+                 LIMIT 50",
+            )
+            .bind(parent_id)
+            .bind(&self.db_id)
+            .bind(min_visibility_atoms)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+
+            total_children += children.len();
+
+            for (j, (child_name,)) in children.iter().enumerate() {
+                let is_last_child = j == children.len() - 1;
+                let connector = if is_last_child {
+                    "\u{2514}\u{2500}\u{2500} "
+                } else {
+                    "\u{251c}\u{2500}\u{2500} "
+                };
+                result.push_str(connector);
+                result.push_str(child_name);
+                result.push('\n');
+            }
+        }
+
+        Ok((result.trim_end().to_string(), total_children))
+    }
 }
 
 #[async_trait]
@@ -980,67 +1054,22 @@ impl TagStore for PostgresStorage {
         Ok(())
     }
 
-    async fn get_tag_tree_for_llm(&self) -> StorageResult<String> {
-        // Step 1: Get top-level category tags flagged as auto-tag targets.
-        let top_level_tags: Vec<(String, String, String)> = sqlx::query_as(
-            "SELECT id, name, autotag_description
-             FROM tags
-             WHERE parent_id IS NULL AND is_autotag_target = TRUE AND db_id = $1
-             ORDER BY name",
-        )
-        .bind(&self.db_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
-
-        if top_level_tags.is_empty() {
-            return Ok("(no existing tags)".to_string());
+    async fn get_tag_tree_for_llm(&self, min_visibility_atoms: i32) -> StorageResult<String> {
+        // Visibility threshold is enforced at the SQL layer with a HAVING
+        // clause (`COUNT(at.atom_id) >= ? OR is_autotag_target = TRUE`).
+        // Cold-start safeguard: if the filter would leave fewer than 5
+        // children across the whole tree, we re-query unfiltered.
+        let (tree, total_children) = self.build_tag_tree_pg(min_visibility_atoms).await?;
+        if min_visibility_atoms > 0 && total_children < 5 {
+            tracing::warn!(
+                min_visibility_atoms,
+                total_children,
+                "tag visibility threshold disabled (cold start) — not enough tags above threshold; falling back to unfiltered tree"
+            );
+            let (fallback, _) = self.build_tag_tree_pg(0).await?;
+            return Ok(fallback);
         }
-
-        // Step 2: For each top-level tag, get top 50 most-used child tags by atom count
-        let mut result = String::new();
-
-        for (parent_id, parent_name, description) in &top_level_tags {
-            result.push_str(parent_name);
-            result.push('\n');
-            let description = description.trim();
-            if !description.is_empty() {
-                result.push_str("Description: ");
-                result.push_str(description);
-                result.push('\n');
-            }
-
-            // Query top 50 children by atom count
-            let children: Vec<(String,)> = sqlx::query_as(
-                "SELECT t.name
-                 FROM tags t
-                 LEFT JOIN atom_tags at ON t.id = at.tag_id
-                 WHERE t.parent_id = $1 AND t.db_id = $2
-                 GROUP BY t.id, t.name
-                 ORDER BY COUNT(at.atom_id) DESC, t.name ASC
-                 LIMIT 50",
-            )
-            .bind(parent_id)
-            .bind(&self.db_id)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
-
-            // Add children with tree formatting
-            for (j, (child_name,)) in children.iter().enumerate() {
-                let is_last_child = j == children.len() - 1;
-                let connector = if is_last_child {
-                    "\u{2514}\u{2500}\u{2500} "
-                } else {
-                    "\u{251c}\u{2500}\u{2500} "
-                };
-                result.push_str(connector);
-                result.push_str(child_name);
-                result.push('\n');
-            }
-        }
-
-        Ok(result.trim_end().to_string())
+        Ok(tree)
     }
 
     async fn compute_tag_centroids_batch(&self, tag_ids: &[String]) -> StorageResult<()> {
