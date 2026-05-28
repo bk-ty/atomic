@@ -36,10 +36,21 @@ async fn main() -> std::io::Result<()> {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "atomic_core=info,atomic_server=info,warn".parse().unwrap());
 
-    use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
+    // Peek at args before parsing so JSON-emitting subcommands (e.g.
+    // tag-health-report) don't pollute stdout with tracing output.
+    let json_stdout_subcommand = std::env::args()
+        .skip(1)
+        .any(|a| a == "tag-health-report");
+    use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Layer};
+
+    let console_layer = if json_stdout_subcommand {
+        fmt::layer().with_writer(std::io::stderr).boxed()
+    } else {
+        fmt::layer().boxed()
+    };
     tracing_subscriber::registry()
         .with(env_filter)
-        .with(fmt::layer()) // console output
+        .with(console_layer)
         .with(
             fmt::layer()
                 .with_ansi(false)
@@ -64,6 +75,48 @@ async fn main() -> std::io::Result<()> {
                 .expect("Failed to get active database");
             run_token_command(&core, action).await;
             Ok(())
+        }
+
+        // Generate a tag-health report (no server)
+        Some(Command::TagHealthReport {
+            storage,
+            database_url,
+            database,
+            avg_threshold,
+            top_rate_threshold,
+        }) => {
+            let manager = create_manager(&data_dir, &storage, database_url.as_deref()).await;
+            let core = match database {
+                Some(id_or_name) => manager
+                    .get_core(&id_or_name)
+                    .await
+                    .expect("Failed to resolve --database"),
+                None => manager
+                    .active_core()
+                    .await
+                    .expect("Failed to get active database"),
+            };
+            let mut thresholds = atomic_core::health::TagHealthThresholds::default();
+            if let Some(v) = avg_threshold {
+                thresholds.avg_tags_per_atom_max = v;
+            }
+            if let Some(v) = top_rate_threshold {
+                thresholds.top_tag_rate_max = v;
+            }
+            match core.compute_tag_health_report(Some(thresholds)).await {
+                Ok(report) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&report)
+                            .expect("serialize tag health report")
+                    );
+                    Ok(())
+                }
+                Err(e) => {
+                    eprintln!("Failed to compute tag health report: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
 
         // Server mode

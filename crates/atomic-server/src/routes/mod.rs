@@ -19,6 +19,7 @@ pub mod ollama;
 pub mod search;
 pub mod settings;
 pub mod setup;
+pub mod tagging;
 pub mod utils;
 pub mod vaults;
 pub mod wiki;
@@ -217,6 +218,10 @@ pub fn configure_routes(cfg: &mut web::ServiceConfig) {
     cfg.route(
         "/tagging/retag-all",
         web::post().to(embedding::retag_all_atoms),
+    );
+    cfg.route(
+        "/tagging/health-report",
+        web::get().to(tagging::get_tag_health_report),
     );
     cfg.route(
         "/embeddings/reembed-all",

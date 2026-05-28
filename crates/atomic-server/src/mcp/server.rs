@@ -417,6 +417,44 @@ impl AtomicMcpServer {
 
         Ok(CallToolResult::success(vec![Content::text(response_text)]))
     }
+
+    /// Surface tag-taxonomy drift before users notice.
+    #[tool(
+        description = "Run a structural tag-health report against the active database. Returns avg/p95/max tags per atom, top-tag dominance, single-child subtrees, junk-drawer parent ratios, 100%-overlap pairs, and an explicit `regressions` array (empty when healthy). Read-only and safe to call hourly."
+    )]
+    async fn tag_health_report(
+        &self,
+        context: RequestContext<RoleServer>,
+        Parameters(params): Parameters<TagHealthReportParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let core = self.resolve_core(&context).await?;
+        let mut thresholds = atomic_core::health::TagHealthThresholds::default();
+        if let Some(v) = params.avg_threshold {
+            thresholds.avg_tags_per_atom_max = v;
+        }
+        if let Some(v) = params.top_rate_threshold {
+            thresholds.top_tag_rate_max = v;
+        }
+        if let Some(v) = params.single_child_threshold {
+            thresholds.single_child_subtrees_max = v;
+        }
+        if let Some(v) = params.p95_threshold {
+            thresholds.p95_tags_per_atom_max = v;
+        }
+        if let Some(v) = params.overlap_top_n {
+            thresholds.overlap_top_n = v.max(1);
+        }
+        if let Some(v) = params.low_visibility_atom_count {
+            thresholds.low_visibility_atom_count = v;
+        }
+        let report = core
+            .compute_tag_health_report(Some(thresholds))
+            .await
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        let response_text = serde_json::to_string_pretty(&report)
+            .map_err(|e| ErrorData::internal_error(format!("Serialization error: {}", e), None))?;
+        Ok(CallToolResult::success(vec![Content::text(response_text)]))
+    }
 }
 
 #[tool_handler]

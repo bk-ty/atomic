@@ -4210,6 +4210,17 @@ impl AtomicCore {
     ) -> Result<Vec<crate::health::audit::HealthFixLog>, AtomicCoreError> {
         self.storage.get_recent_fixes_sync(limit).await
     }
+
+    /// Compute a tag-health report (read-only). Surfaces over-tagging
+    /// drift, junk-drawer parents, single-child subtrees, and 100%-overlap
+    /// pairs. Used by the `/api/tagging/health-report` endpoint and the
+    /// `tag_health_report` MCP tool.
+    pub async fn compute_tag_health_report(
+        &self,
+        thresholds: Option<crate::health::TagHealthThresholds>,
+    ) -> Result<crate::health::TagHealthReport, AtomicCoreError> {
+        crate::health::compute_tag_health_report(self, thresholds).await
+    }
 }
 
 fn oauth_unavailable() -> AtomicCoreError {
