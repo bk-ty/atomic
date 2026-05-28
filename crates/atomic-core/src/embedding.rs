@@ -907,7 +907,7 @@ async fn process_tagging_only_inner(
                 let min_visibility_atoms: i32 = settings_map
                     .get("tagging_min_visibility_atoms")
                     .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
+                    .unwrap_or(2);
                 let tag_tree_json = storage
                     .get_tag_tree_for_llm_impl(min_visibility_atoms)
                     .await
@@ -950,7 +950,7 @@ async fn process_tagging_only_inner(
                     let max_new_tags: usize = settings_map
                         .get("tagging_max_new_tags")
                         .and_then(|s| s.parse().ok())
-                        .unwrap_or(1);
+                        .unwrap_or(0);
                     let tagging_cfg = crate::extraction::TaggingConfig {
                         max_tags,
                         prefer_existing,

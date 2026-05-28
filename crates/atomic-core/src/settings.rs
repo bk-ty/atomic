@@ -78,22 +78,28 @@ pub const DEFAULT_SETTINGS: &[(&str, &str)] = &[
     ("briefing_prompt", ""),
     ("chat_prompt", ""),
     ("tagging_prompt", ""),
-    // Per-atom tagging cap. Defaults match the post-incident audit
-    // (2026-05-28): hard cap 5, prefer existing tags over inventing new
-    // ones, allow at most 1 net-new tag per atom. All three are
-    // enforced by atomic-core regardless of any custom `tagging_prompt`
-    // override the user has set — `tagging_prompt` controls the prose
-    // in the system message, these settings gate the schema and a
-    // post-LLM filter so a runaway prompt cannot blow past the cap.
+    // Per-atom tagging cap. Defaults are the catalog-health policy
+    // (workspace-3e1.1 / 3e1.2): hard cap 5, prefer existing tags
+    // over inventing new ones, and **block** all net-new tag creation
+    // by default (`tagging_max_new_tags = 0`). Set to a positive value
+    // to opt back into LLM-driven tag invention. All three are enforced
+    // by atomic-core regardless of any custom `tagging_prompt` override
+    // — `tagging_prompt` controls the prose, these settings gate the
+    // schema and a post-LLM filter so a runaway prompt cannot blow past
+    // the cap.
     ("tagging_max_tags", "5"),
     ("tagging_prefer_existing", "true"),
-    ("tagging_max_new_tags", "1"),
+    ("tagging_max_new_tags", "0"),
     // Hide children whose `atom_count` is below the threshold from the
-    // candidate tag tree the LLM sees. Default `0` (disabled) preserves
-    // pre-T37 behavior. Children with `is_autotag_target = 1` are exempt.
-    // A cold-start safeguard disables the filter when fewer than 5
-    // children remain (see `extraction::get_tag_tree_for_llm_with_visibility`).
-    ("tagging_min_visibility_atoms", "0"),
+    // candidate tag tree the LLM sees. Default `2` (catalog-health
+    // policy, workspace-3e1.2): 1-atom singletons stay invisible to the
+    // LLM so it cannot keep recreating them as synonyms. Children with
+    // `is_autotag_target = 1` are exempt (curated leaves remain
+    // visible). A cold-start safeguard disables the filter when fewer
+    // than 5 children remain (see
+    // `extraction::get_tag_tree_for_llm_with_visibility`). Set to `0`
+    // to disable filtering entirely.
+    ("tagging_min_visibility_atoms", "2"),
     // k-NN tag inheritance — propagates tags from semantically nearest
     // already-tagged atoms before/instead of the LLM tagger. Sure-fire path
     // for content that resembles existing atoms (recurring meetings, repeated
@@ -348,5 +354,34 @@ mod tests {
 
         // Deleting a missing key is a no-op (does not error).
         delete_setting(&conn, "never_existed").unwrap();
+    }
+
+    /// Catalog-health policy pin (workspace-3e1.1 / 3e1.2). Flipping
+    /// either of these defaults silently re-opens the door to taxonomy
+    /// drift: `tagging_max_new_tags=0` blocks the LLM from inventing
+    /// brand-new tags, and `tagging_min_visibility_atoms=2` hides
+    /// 1-atom singletons from the candidate tree so the LLM cannot
+    /// recreate them as synonyms.
+    #[test]
+    fn catalog_health_tagging_defaults_are_strict() {
+        let mut new_tags = None;
+        let mut min_visibility = None;
+        for (key, val) in DEFAULT_SETTINGS {
+            match *key {
+                "tagging_max_new_tags" => new_tags = Some(*val),
+                "tagging_min_visibility_atoms" => min_visibility = Some(*val),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            new_tags,
+            Some("0"),
+            "tagging_max_new_tags default must be 0 (workspace-3e1.1: block LLM tag invention by default)"
+        );
+        assert_eq!(
+            min_visibility,
+            Some("2"),
+            "tagging_min_visibility_atoms default must be 2 (workspace-3e1.2: hide 1-atom singletons from the LLM)"
+        );
     }
 }
