@@ -999,7 +999,7 @@ mod tests {
             "briefing_generation_result",
             crate::briefing::agentic::briefing_schema(),
         );
-        out.insert("extraction_result", crate::extraction::extraction_schema());
+        out.insert("extraction_result", crate::extraction::extraction_schema(5));
         out.insert(
             "consolidation_result",
             crate::extraction::consolidation_schema(),

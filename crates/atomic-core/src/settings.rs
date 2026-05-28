@@ -78,6 +78,16 @@ pub const DEFAULT_SETTINGS: &[(&str, &str)] = &[
     ("briefing_prompt", ""),
     ("chat_prompt", ""),
     ("tagging_prompt", ""),
+    // Per-atom tagging cap. Defaults match the post-incident audit
+    // (2026-05-28): hard cap 5, prefer existing tags over inventing new
+    // ones, allow at most 1 net-new tag per atom. All three are
+    // enforced by atomic-core regardless of any custom `tagging_prompt`
+    // override the user has set — `tagging_prompt` controls the prose
+    // in the system message, these settings gate the schema and a
+    // post-LLM filter so a runaway prompt cannot blow past the cap.
+    ("tagging_max_tags", "5"),
+    ("tagging_prefer_existing", "true"),
+    ("tagging_max_new_tags", "1"),
     // k-NN tag inheritance — propagates tags from semantically nearest
     // already-tagged atoms before/instead of the LLM tagger. Sure-fire path
     // for content that resembles existing atoms (recurring meetings, repeated
