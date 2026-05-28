@@ -2534,10 +2534,14 @@ pub struct KnnTaggingConfig {
     /// Number of nearest neighbor *atoms* (not chunks) to consider.
     pub k: usize,
     /// Minimum number of those k neighbors that must share a tag for it
-    /// to be inherited. Higher = more conservative.
+    /// to be inherited. Higher = more conservative. Tightened from 3→5
+    /// after the 2026-05-28 corpus cleanup; 3 was set when the corpus was
+    /// 93% over-tagged and neighbors looked uniformly similar.
     pub min_consensus: usize,
     /// Cosine-similarity floor for chunk-level matches feeding the vote.
-    /// Chunks below this similarity are ignored entirely.
+    /// Chunks below this similarity are ignored entirely. Tightened from
+    /// 0.55→0.65 after the 2026-05-28 corpus cleanup; 0.55 was permissive
+    /// because pollution made everything look similar.
     pub min_similarity: f32,
 }
 
@@ -2545,8 +2549,8 @@ impl Default for KnnTaggingConfig {
     fn default() -> Self {
         Self {
             k: 10,
-            min_consensus: 3,
-            min_similarity: 0.55,
+            min_consensus: 5,
+            min_similarity: 0.65,
         }
     }
 }
