@@ -1189,6 +1189,22 @@ impl SqliteStorage {
         Ok(count as i32)
     }
 
+    /// Delete every `atom_tags` row where `source = 'auto'`. Manual rows are
+    /// preserved. Wiki-backed auto rows are NOT preserved — see
+    /// `delete_auto_tags_without_wiki_sync` for the wiki-preserving variant.
+    pub(crate) fn delete_all_auto_tags_sync(&self) -> StorageResult<i32> {
+        let conn = self
+            .db
+            .conn
+            .lock()
+            .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
+        let count = conn.execute(
+            "DELETE FROM atom_tags WHERE source = 'auto'",
+            [],
+        )?;
+        Ok(count as i32)
+    }
+
     pub(crate) fn get_pipeline_status_sync(&self) -> StorageResult<PipelineStatus> {
         let conn = self.db.read_conn()?;
         let pending: i32 = conn.query_row(
@@ -1570,6 +1586,10 @@ impl ChunkStore for SqliteStorage {
 
     async fn delete_auto_tags_without_wiki(&self) -> StorageResult<i32> {
         self.delete_auto_tags_without_wiki_sync()
+    }
+
+    async fn delete_all_auto_tags(&self) -> StorageResult<i32> {
+        self.delete_all_auto_tags_sync()
     }
 
     async fn claim_pending_edges(&self, limit: i32) -> StorageResult<Vec<String>> {

@@ -7,7 +7,7 @@ use crate::state::AppState;
 use actix_web::{web, HttpResponse};
 use atomic_core::models::PipelineStatus;
 use atomic_core::registry::DatabaseInfo;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 #[derive(Serialize, ToSchema)]
@@ -85,10 +85,30 @@ pub async fn retry_failed_tagging(state: web::Data<AppState>, db: Db) -> HttpRes
     }
 }
 
-#[utoipa::path(post, path = "/api/tagging/retag-all", responses((status = 200, description = "Number of atoms queued for re-tagging")), tag = "embeddings")]
-pub async fn retag_all_atoms(state: web::Data<AppState>, db: Db) -> HttpResponse {
+#[derive(Deserialize, ToSchema, Default)]
+pub struct RetagAllRequest {
+    /// When true, drop wiki-backed auto tags during the prune step. Defaults
+    /// to false (wiki-backed auto tags are preserved). Use only during
+    /// recovery from a polluted corpus.
+    #[serde(default)]
+    pub force_prune_wiki_backed: bool,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/tagging/retag-all",
+    request_body = RetagAllRequest,
+    responses((status = 200, description = "Number of atoms queued for re-tagging")),
+    tag = "embeddings",
+)]
+pub async fn retag_all_atoms(
+    state: web::Data<AppState>,
+    db: Db,
+    body: Option<web::Json<RetagAllRequest>>,
+) -> HttpResponse {
     let on_event = embedding_event_callback(state.event_tx.clone());
-    match db.0.retag_all_atoms(on_event).await {
+    let force_prune = body.map(|b| b.force_prune_wiki_backed).unwrap_or(false);
+    match db.0.retag_all_atoms(force_prune, on_event).await {
         Ok(count) => HttpResponse::Ok().json(serde_json::json!({"count": count})),
         Err(e) => crate::error::error_response(e),
     }

@@ -1165,6 +1165,19 @@ impl ChunkStore for PostgresStorage {
         Ok(result.rows_affected() as i32)
     }
 
+    async fn delete_all_auto_tags(&self) -> StorageResult<i32> {
+        let result = sqlx::query(
+            "DELETE FROM atom_tags
+             WHERE db_id = $1
+               AND source = 'auto'",
+        )
+        .bind(&self.db_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
+        Ok(result.rows_affected() as i32)
+    }
+
     async fn claim_pending_edges(&self, limit: i32) -> StorageResult<Vec<String>> {
         let rows: Vec<(String,)> = sqlx::query_as(
             "UPDATE atoms SET edges_status = 'processing'

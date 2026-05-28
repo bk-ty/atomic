@@ -917,6 +917,8 @@ dispatch! {
         => sqlite: claim_all_for_retagging_sync, pg_trait: ChunkStore, pg_method: claim_all_for_retagging;
     fn delete_auto_tags_without_wiki_sync(&self) -> Result<i32, AtomicCoreError>
         => sqlite: delete_auto_tags_without_wiki_sync, pg_trait: ChunkStore, pg_method: delete_auto_tags_without_wiki;
+    fn delete_all_auto_tags_sync(&self) -> Result<i32, AtomicCoreError>
+        => sqlite: delete_all_auto_tags_sync, pg_trait: ChunkStore, pg_method: delete_all_auto_tags;
     fn claim_pending_edges_sync(&self, limit: i32) -> Result<Vec<String>, AtomicCoreError>
         => sqlite: claim_pending_edges_sync, pg_trait: ChunkStore, pg_method: claim_pending_edges;
     fn set_edges_status_batch_sync(&self, atom_ids: &[String], status: &str) -> Result<(), AtomicCoreError>
