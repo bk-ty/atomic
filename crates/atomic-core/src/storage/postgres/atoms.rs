@@ -708,74 +708,40 @@ impl AtomStore for PostgresStorage {
         let (title, snippet) = extract_title_and_snippet(&request.content, 300);
         let source = request.source_url.as_deref().map(parse_source);
 
-        let existing_content: Option<String> =
-            sqlx::query_scalar("SELECT content FROM atoms WHERE id = $1 AND db_id = $2")
-                .bind(id)
-                .bind(&self.db_id)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
-        let content_changed = existing_content.as_deref() != Some(request.content.as_str());
-
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
 
-        if content_changed {
-            sqlx::query(
-                "UPDATE atoms
-                 SET content = $1,
-                     source_url = $2,
-                     source = $3,
-                     published_at = $4,
-                     updated_at = $5,
-                     embedding_status = 'pending',
-                     tagging_status = 'pending',
-                     embedding_error = NULL,
-                     tagging_error = NULL,
-                     title = $6,
-                     snippet = $7
-                 WHERE id = $8 AND db_id = $9",
-            )
-            .bind(&request.content)
-            .bind(&request.source_url)
-            .bind(&source)
-            .bind(&request.published_at)
-            .bind(updated_at)
-            .bind(&title)
-            .bind(&snippet)
-            .bind(id)
-            .bind(&self.db_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
-        } else {
-            sqlx::query(
-                "UPDATE atoms
-                 SET content = $1,
-                     source_url = $2,
-                     source = $3,
-                     published_at = $4,
-                     updated_at = $5,
-                     title = $6,
-                     snippet = $7
-                 WHERE id = $8 AND db_id = $9",
-            )
-            .bind(&request.content)
-            .bind(&request.source_url)
-            .bind(&source)
-            .bind(&request.published_at)
-            .bind(updated_at)
-            .bind(&title)
-            .bind(&snippet)
-            .bind(id)
-            .bind(&self.db_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
-        }
+        // Content-only update: preserve embedding_status / tagging_status
+        // regardless of whether content changed. Flipping them to 'pending'
+        // here was a copy-paste from `update_atom`; this entry point is the
+        // editor draft-save path that promises NOT to re-trigger the
+        // embedding or tagging pipeline.
+        sqlx::query(
+            "UPDATE atoms
+             SET content = $1,
+                 source_url = $2,
+                 source = $3,
+                 published_at = $4,
+                 updated_at = $5,
+                 title = $6,
+                 snippet = $7
+             WHERE id = $8 AND db_id = $9",
+        )
+        .bind(&request.content)
+        .bind(&request.source_url)
+        .bind(&source)
+        .bind(&request.published_at)
+        .bind(updated_at)
+        .bind(&title)
+        .bind(&snippet)
+        .bind(id)
+        .bind(&self.db_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
 
         if let Some(ref tag_ids) = request.tag_ids {
             sqlx::query("DELETE FROM atom_tags WHERE atom_id = $1 AND db_id = $2")

@@ -1615,7 +1615,7 @@ impl ChunkStore for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
-    use crate::{AtomicCore, CreateAtomRequest};
+    use crate::{AtomicCore, CreateAtomRequest, UpdateAtomRequest};
     use tempfile::TempDir;
 
     async fn enqueue_and_claim_pipeline_job(
@@ -1920,5 +1920,136 @@ mod tests {
         assert_eq!(status.tagging_pending, 1);
         assert_eq!(status.queued_embedding, 0);
         assert_eq!(status.queued_tagging, 0);
+    }
+
+    /// Regression for T45: `update_atom_content_only` MUST NOT flip
+    /// `embedding_status` / `tagging_status` from `complete` to `pending`.
+    /// The function's contract is "save content/metadata without retriggering
+    /// the pipeline"; flipping status here was a copy-paste from the full
+    /// `update_atom` path that silently re-tagged every minor edit.
+    #[tokio::test]
+    async fn update_atom_content_only_preserves_complete_status() {
+        let dir = TempDir::new().expect("create tempdir");
+        let core = AtomicCore::open_or_create(dir.path().join("pipeline.db"))
+            .expect("open sqlite test db");
+        // Empty initial content avoids spinning up the background pipeline
+        // (no AI provider in this unit test). The body the user "sees" is the
+        // one we send via `update_atom_content_only` below — that is the path
+        // under test.
+        let created = core
+            .create_atom(
+                CreateAtomRequest {
+                    content: String::new(),
+                    ..Default::default()
+                },
+                |_| {},
+            )
+            .await
+            .expect("create atom")
+            .expect("atom inserted");
+        let atom_id = created.atom.id.clone();
+
+        // Seed a finalized pipeline state via the same storage handle the
+        // core uses. Going through `set_embedding_status` / `set_tagging_status`
+        // (instead of opening a sibling `rusqlite::Connection`) keeps the FTS
+        // / vec extension state coherent with `core`.
+        core.storage()
+            .set_embedding_status_sync(&atom_id, "complete", None)
+            .await
+            .expect("seed embedding_status=complete");
+        core.storage()
+            .set_tagging_status_sync(&atom_id, "complete", None)
+            .await
+            .expect("seed tagging_status=complete");
+
+        let pre = core.get_atom(&atom_id).await.unwrap().expect("atom exists");
+        assert_eq!(pre.atom.embedding_status, "complete");
+        assert_eq!(pre.atom.tagging_status, "complete");
+
+        // Body change. Per docstring this MUST NOT retrigger embedding or
+        // tagging — i.e. status must remain "complete".
+        core.update_atom_content_only(
+            &atom_id,
+            UpdateAtomRequest {
+                content: "edited body — same atom, different text".to_string(),
+                source_url: None,
+                published_at: None,
+                tag_ids: None,
+            },
+        )
+        .await
+        .expect("draft save");
+
+        let post = core.get_atom(&atom_id).await.unwrap().expect("atom exists");
+        assert_eq!(
+            post.atom.embedding_status, "complete",
+            "embedding_status must survive a content-only update"
+        );
+        assert_eq!(
+            post.atom.tagging_status, "complete",
+            "tagging_status must survive a content-only update"
+        );
+        assert_eq!(post.atom.content, "edited body — same atom, different text");
+
+        // Pipeline counters reflect the same invariant: nothing pending,
+        // nothing queued.
+        let status = core.get_pipeline_status().await.expect("pipeline status");
+        assert_eq!(
+            status.pending, 0,
+            "no atom should be marked pending after a content-only update on a complete atom"
+        );
+        assert_eq!(
+            status.tagging_pending, 0,
+            "no atom should be marked tagging-pending after a content-only update on a complete atom"
+        );
+    }
+
+    /// Regression for T45: a no-op content-only update (content unchanged)
+    /// also preserves status. The pre-fix behaviour was already correct on
+    /// this path — pinning it down so a future refactor doesn't regress it.
+    #[tokio::test]
+    async fn update_atom_content_only_unchanged_content_preserves_status() {
+        let dir = TempDir::new().expect("create tempdir");
+        let core = AtomicCore::open_or_create(dir.path().join("pipeline.db"))
+            .expect("open sqlite test db");
+        let created = core
+            .create_atom(
+                CreateAtomRequest {
+                    content: String::new(),
+                    ..Default::default()
+                },
+                |_| {},
+            )
+            .await
+            .expect("create atom")
+            .expect("atom inserted");
+        let atom_id = created.atom.id.clone();
+
+        core.storage()
+            .set_embedding_status_sync(&atom_id, "complete", None)
+            .await
+            .expect("seed embedding_status=complete");
+        core.storage()
+            .set_tagging_status_sync(&atom_id, "complete", None)
+            .await
+            .expect("seed tagging_status=complete");
+
+        // Empty content stored, calling update_atom_content_only with empty
+        // content again — nothing changes.
+        core.update_atom_content_only(
+            &atom_id,
+            UpdateAtomRequest {
+                content: String::new(),
+                source_url: None,
+                published_at: None,
+                tag_ids: None,
+            },
+        )
+        .await
+        .expect("no-op draft save");
+
+        let post = core.get_atom(&atom_id).await.unwrap().expect("atom exists");
+        assert_eq!(post.atom.embedding_status, "complete");
+        assert_eq!(post.atom.tagging_status, "complete");
     }
 }
