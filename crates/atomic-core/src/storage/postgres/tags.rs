@@ -394,7 +394,7 @@ impl TagStore for PostgresStorage {
         let result = sqlx::query(
             "UPDATE tags
              SET autotag_description = $1
-             WHERE id = $2 AND db_id = $3 AND parent_id IS NULL",
+             WHERE id = $2 AND db_id = $3",
         )
         .bind(description.trim())
         .bind(id)
@@ -403,7 +403,7 @@ impl TagStore for PostgresStorage {
         .await
         .map_err(|e| AtomicCoreError::DatabaseOperation(e.to_string()))?;
         if result.rows_affected() == 0 {
-            return Err(AtomicCoreError::NotFound(format!("top-level tag {}", id)));
+            return Err(AtomicCoreError::NotFound(format!("tag {}", id)));
         }
         Ok(())
     }

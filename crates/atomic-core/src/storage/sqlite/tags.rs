@@ -254,11 +254,11 @@ impl SqliteStorage {
             .lock()
             .map_err(|e| AtomicCoreError::Lock(e.to_string()))?;
         let affected = conn.execute(
-            "UPDATE tags SET autotag_description = ?1 WHERE id = ?2 AND parent_id IS NULL",
+            "UPDATE tags SET autotag_description = ?1 WHERE id = ?2",
             rusqlite::params![description.trim(), id],
         )?;
         if affected == 0 {
-            return Err(AtomicCoreError::NotFound(format!("top-level tag {}", id)));
+            return Err(AtomicCoreError::NotFound(format!("tag {}", id)));
         }
         Ok(())
     }
