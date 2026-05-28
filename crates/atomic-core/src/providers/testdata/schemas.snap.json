@@ -63,7 +63,7 @@
     "additionalProperties": false,
     "properties": {
       "tags": {
-        "description": "Tags to apply to this text",
+        "description": "Up to 5 tags identifying the document's primary subjects (not topics it merely mentions)",
         "items": {
           "additionalProperties": false,
           "properties": {
@@ -82,6 +82,7 @@
           ],
           "type": "object"
         },
+        "maxItems": 5,
         "type": "array"
       }
     },
