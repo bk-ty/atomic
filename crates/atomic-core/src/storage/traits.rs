@@ -239,7 +239,13 @@ pub trait TagStore: Send + Sync {
     async fn link_tags_to_atom(&self, atom_id: &str, tag_ids: &[String]) -> StorageResult<()>;
 
     /// Get the tag tree formatted as JSON for LLM tag extraction.
-    async fn get_tag_tree_for_llm(&self) -> StorageResult<String>;
+    ///
+    /// `min_visibility_atoms` (default `0`) hides children whose
+    /// `atom_count` is below the threshold. Children with
+    /// `is_autotag_target = 1` are always exempt. A cold-start safeguard
+    /// disables the filter when fewer than 5 children remain (see
+    /// `crate::extraction::get_tag_tree_for_llm_with_visibility`).
+    async fn get_tag_tree_for_llm(&self, min_visibility_atoms: i32) -> StorageResult<String>;
 
     /// Compute tag centroid embeddings for a batch of tags from their atoms' embeddings.
     async fn compute_tag_centroids_batch(&self, tag_ids: &[String]) -> StorageResult<()>;

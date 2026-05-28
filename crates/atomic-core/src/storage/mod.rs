@@ -853,7 +853,7 @@ dispatch! {
         => sqlite: get_or_create_tag_impl, pg_trait: TagStore, pg_method: get_or_create_tag;
     fn link_tags_to_atom_impl(&self, atom_id: &str, tag_ids: &[String]) -> Result<(), AtomicCoreError>
         => sqlite: link_tags_to_atom_impl, pg_trait: TagStore, pg_method: link_tags_to_atom;
-    fn get_tag_tree_for_llm_impl(&self) -> Result<String, AtomicCoreError>
+    fn get_tag_tree_for_llm_impl(&self, min_visibility_atoms: i32) -> Result<String, AtomicCoreError>
         => sqlite: get_tag_tree_for_llm_impl, pg_trait: TagStore, pg_method: get_tag_tree_for_llm;
     fn compute_tag_centroids_batch_impl(&self, tag_ids: &[String]) -> Result<(), AtomicCoreError>
         => sqlite: compute_tag_centroids_batch_impl, pg_trait: TagStore, pg_method: compute_tag_centroids_batch;

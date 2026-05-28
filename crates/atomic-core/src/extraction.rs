@@ -424,14 +424,62 @@ pub async fn extract_tags_from_chunk(
     }
 }
 
-/// Get simplified tag tree for LLM (tree format like `tree` CLI)
-/// This exposes only tag names to the LLM without internal database IDs.
-///
-/// To reduce LLM confusion with large tag hierarchies, this function:
-/// 1. Shows only top-level category tags (parent_id IS NULL)
-/// 2. For each category, shows only the top 50 most-used child tags (by atom count)
-/// 3. Excludes any tags at Level 3 or deeper
+/// Get simplified tag tree for LLM (tree format like `tree` CLI). This is
+/// the public entrypoint; it is equivalent to
+/// `get_tag_tree_for_llm_with_visibility(conn, 0)`. Existing callers that
+/// do not need visibility filtering keep using this symbol unchanged.
 pub fn get_tag_tree_for_llm(conn: &Connection) -> Result<String, String> {
+    let (tree, _) = build_tag_tree(conn, 0)?;
+    Ok(tree)
+}
+
+/// Get simplified tag tree for LLM with an optional visibility threshold.
+///
+/// `min_visibility_atoms` (default `0`) hides children whose `atom_count`
+/// is below the threshold. Children with `is_autotag_target = 1` are
+/// exempt: curated empty leaves stay visible regardless of count.
+///
+/// Cold-start safeguard: if applying the filter would leave fewer than
+/// `5` children across the whole tree, the filter is disabled for that
+/// call and a warning is logged. Without this guard, a fresh corpus with
+/// every tag at `atom_count = 1` would render an empty tree and silently
+/// disable auto-tagging.
+pub fn get_tag_tree_for_llm_with_visibility(
+    conn: &Connection,
+    min_visibility_atoms: i32,
+) -> Result<String, String> {
+    if min_visibility_atoms <= 0 {
+        let (tree, _) = build_tag_tree(conn, 0)?;
+        return Ok(tree);
+    }
+    let (tree, total_children) = build_tag_tree(conn, min_visibility_atoms)?;
+    if total_children < 5 {
+        tracing::warn!(
+            min_visibility_atoms,
+            total_children,
+            "tag visibility threshold disabled (cold start) — not enough tags above threshold; falling back to unfiltered tree"
+        );
+        let (fallback, _) = build_tag_tree(conn, 0)?;
+        return Ok(fallback);
+    }
+    Ok(tree)
+}
+
+/// Build the LLM-facing tag tree, filtering children by atom_count when
+/// `min_visibility_atoms > 0`. Returns `(tree_string, total_children)`
+/// where `total_children` is the number of child rows that survived the
+/// filter across all top-level parents.
+///
+/// The shape of the output matches the legacy `get_tag_tree_for_llm`
+/// rendering exactly when `min_visibility_atoms = 0`: top-level parents
+/// (sorted by name) followed by up to 50 children each, with the
+/// `Description: ` continuation line for parents and an indented
+/// `Description: ` line for children with non-empty
+/// `autotag_description`.
+fn build_tag_tree(
+    conn: &Connection,
+    min_visibility_atoms: i32,
+) -> Result<(String, usize), String> {
     // Step 1: Get top-level category tags flagged as auto-tag targets.
     // Tags without is_autotag_target = 1 are intentionally excluded so the
     // auto-tagger only extends categories the user has opted into.
@@ -451,14 +499,17 @@ pub fn get_tag_tree_for_llm(conn: &Connection) -> Result<String, String> {
         .map_err(|e| format!("Failed to collect top-level tags: {}", e))?;
 
     if top_level_tags.is_empty() {
-        return Ok("(no existing tags)".to_string());
+        return Ok(("(no existing tags)".to_string(), 0));
     }
 
-    // Step 2: For each top-level tag, get top 50 most-used child tags by atom count
+    // Step 2: For each top-level tag, get top 50 most-used children. The
+    // filter is `count >= threshold OR is_autotag_target = 1` — curated
+    // leaves bypass the visibility cap so an operator can keep a placeholder
+    // child available before any atom lands on it.
     let mut result = String::new();
+    let mut total_children: usize = 0;
 
     for (i, (parent_id, parent_name, description)) in top_level_tags.iter().enumerate() {
-        // Add the top-level category
         result.push_str(parent_name);
         result.push('\n');
         let description = description.trim();
@@ -468,9 +519,6 @@ pub fn get_tag_tree_for_llm(conn: &Connection) -> Result<String, String> {
             result.push('\n');
         }
 
-        // Query top 50 children by atom count, including their autotag_description
-        // so the LLM sees disambiguation hints on individual children too — not
-        // just on top-level parents. Empty descriptions are skipped at print time.
         let mut children_stmt = conn
             .prepare(
                 "SELECT t.name, t.autotag_description, COUNT(at.atom_id) as atom_count
@@ -478,18 +526,22 @@ pub fn get_tag_tree_for_llm(conn: &Connection) -> Result<String, String> {
                  LEFT JOIN atom_tags at ON t.id = at.tag_id
                  WHERE t.parent_id = ?1
                  GROUP BY t.id
+                 HAVING COUNT(at.atom_id) >= ?2 OR t.is_autotag_target = 1
                  ORDER BY atom_count DESC, t.name ASC
                  LIMIT 50",
             )
             .map_err(|e| format!("Failed to prepare children query: {}", e))?;
 
         let children: Vec<(String, String)> = children_stmt
-            .query_map([parent_id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .query_map(rusqlite::params![parent_id, min_visibility_atoms], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
             .map_err(|e| format!("Failed to query children: {}", e))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| format!("Failed to collect children: {}", e))?;
 
-        // Add children with tree formatting
+        total_children += children.len();
+
         for (j, (child_name, child_description)) in children.iter().enumerate() {
             let is_last_child = j == children.len() - 1;
             let connector = if is_last_child {
@@ -510,13 +562,12 @@ pub fn get_tag_tree_for_llm(conn: &Connection) -> Result<String, String> {
             }
         }
 
-        // Add blank line between categories (except after the last one)
         if i < top_level_tags.len() - 1 && !children.is_empty() {
             // No extra blank line needed, tree structure is clear
         }
     }
 
-    Ok(result.trim_end().to_string())
+    Ok((result.trim_end().to_string(), total_children))
 }
 
 /// Link tags to an atom (append to existing tags)
@@ -964,6 +1015,145 @@ mod tests {
         assert_eq!(result, "(no existing tags)");
     }
 
+    // ==================== Tag Visibility Filter Tests (T37) ====================
+
+    /// Insert a parent (autotag-target) and N children with controllable
+    /// per-child atom counts. Returns the parent id. Children are named
+    /// `child_<i>`; their atom_count is `counts[i]`.
+    fn seed_visibility_fixture(
+        conn: &rusqlite::Connection,
+        parent_name: &str,
+        children: &[(&str, i32, i32 /* is_autotag_target */)],
+    ) -> String {
+        let now = chrono::Utc::now().to_rfc3339();
+        let parent_id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO tags (id, name, parent_id, created_at, is_autotag_target) VALUES (?1, ?2, NULL, ?3, 1)",
+            rusqlite::params![&parent_id, parent_name, &now],
+        )
+        .unwrap();
+
+        for (name, count, is_target) in children {
+            let child_id = uuid::Uuid::new_v4().to_string();
+            conn.execute(
+                "INSERT INTO tags (id, name, parent_id, created_at, is_autotag_target) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![&child_id, name, &parent_id, &now, is_target],
+            )
+            .unwrap();
+            for _ in 0..*count {
+                let atom_id = uuid::Uuid::new_v4().to_string();
+                conn.execute(
+                    "INSERT INTO atoms (id, content, created_at, updated_at) VALUES (?1, ?2, ?3, ?3)",
+                    rusqlite::params![&atom_id, "x", &now],
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO atom_tags (atom_id, tag_id) VALUES (?1, ?2)",
+                    rusqlite::params![&atom_id, &child_id],
+                )
+                .unwrap();
+            }
+        }
+        parent_id
+    }
+
+    #[test]
+    fn visibility_threshold_zero_returns_unfiltered_tree() {
+        let (db, _temp) = create_test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_visibility_fixture(
+            &conn,
+            "Topics",
+            &[("rare", 0, 0), ("common", 5, 0)],
+        );
+
+        let result = get_tag_tree_for_llm_with_visibility(&conn, 0).unwrap();
+        assert!(result.contains("rare"), "threshold=0 must keep low-count children");
+        assert!(result.contains("common"));
+    }
+
+    #[test]
+    fn visibility_threshold_filters_low_count_children() {
+        let (db, _temp) = create_test_db();
+        let conn = db.conn.lock().unwrap();
+        // Need >=5 surviving children to avoid the cold-start fallback,
+        // so seed six high-count children plus one rare child.
+        seed_visibility_fixture(
+            &conn,
+            "Topics",
+            &[
+                ("rare_below_threshold", 1, 0),
+                ("c1", 5, 0),
+                ("c2", 5, 0),
+                ("c3", 5, 0),
+                ("c4", 5, 0),
+                ("c5", 5, 0),
+                ("c6", 5, 0),
+            ],
+        );
+
+        let result = get_tag_tree_for_llm_with_visibility(&conn, 2).unwrap();
+        assert!(
+            !result.contains("rare_below_threshold"),
+            "child with atom_count < threshold must be filtered: {}",
+            result
+        );
+        assert!(result.contains("c1"));
+        assert!(result.contains("c6"));
+    }
+
+    #[test]
+    fn visibility_threshold_exempts_autotag_target_children() {
+        let (db, _temp) = create_test_db();
+        let conn = db.conn.lock().unwrap();
+        seed_visibility_fixture(
+            &conn,
+            "Topics",
+            &[
+                // Curated leaf with zero atoms — must survive the filter.
+                ("curated_seed", 0, 1),
+                ("c1", 5, 0),
+                ("c2", 5, 0),
+                ("c3", 5, 0),
+                ("c4", 5, 0),
+                ("c5", 5, 0),
+            ],
+        );
+
+        let result = get_tag_tree_for_llm_with_visibility(&conn, 3).unwrap();
+        assert!(
+            result.contains("curated_seed"),
+            "is_autotag_target=1 child must be exempt from visibility filter: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn visibility_threshold_cold_start_falls_back_to_unfiltered() {
+        let (db, _temp) = create_test_db();
+        let conn = db.conn.lock().unwrap();
+        // Only 3 children would survive the filter — below the 5-child
+        // floor — so the helper must fall back to the unfiltered tree.
+        seed_visibility_fixture(
+            &conn,
+            "Topics",
+            &[
+                ("rare1", 0, 0),
+                ("rare2", 0, 0),
+                ("rare3", 1, 0),
+                ("kept1", 9, 0),
+                ("kept2", 9, 0),
+                ("kept3", 9, 0),
+            ],
+        );
+
+        let result = get_tag_tree_for_llm_with_visibility(&conn, 5).unwrap();
+        assert!(
+            result.contains("rare1") && result.contains("rare2") && result.contains("rare3"),
+            "cold-start fallback must return the unfiltered tree (all children present): {}",
+            result
+        );
+    }
     // ==================== Tag Name Lookup Tests ====================
 
     #[test]
